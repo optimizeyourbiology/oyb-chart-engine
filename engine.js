@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.4
+ * OYB Chart Engine — v1.1.5
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -262,15 +262,19 @@ document.addEventListener('DOMContentLoaded', function () {
     id: 'ieeeLabels',
     afterDatasetsDraw: function (chart) {
       var xs = chart.scales.x, ys = chart.scales.y, ctx = chart.ctx;
+      function halo(w) { ctx.fillStyle = 'rgba(255,255,255,0.82)'; ctx.fillRect(-w / 2 - 5, -2, w + 10, 17); }
       function along(fn, text, color, fA, fB) {
         var x1 = xs.getPixelForValue(fA), y1 = ys.getPixelForValue(fn(fA)), x2 = xs.getPixelForValue(fB), y2 = ys.getPixelForValue(fn(fB));
         ctx.save(); ctx.translate((x1 + x2) / 2, (y1 + y2) / 2); ctx.rotate(Math.atan2(y2 - y1, x2 - x1));
-        ctx.font = "800 12px Nunito"; ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(text, 0, 5); ctx.restore();
+        ctx.font = "800 12px Nunito"; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        halo(ctx.measureText(text).width);
+        ctx.fillStyle = color; ctx.fillText(text, 0, 1); ctx.restore();
       }
       along(ieeeLow, 'Low effect limit', AMBER, 120, 320);
       along(ieeeNo, 'No effect limit', GREEN, 700, 2500);
-      ctx.save(); ctx.font = "800 13px Nunito"; ctx.fillStyle = RED; ctx.textAlign = 'center';
-      ctx.fillText('High risk', xs.getPixelForValue(14), ys.getPixelForValue(55)); ctx.restore();
+      ctx.save(); ctx.font = "800 13px Nunito"; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.translate(xs.getPixelForValue(14), ys.getPixelForValue(55)); halo(ctx.measureText('High risk').width);
+      ctx.fillStyle = RED; ctx.fillText('High risk', 0, 1); ctx.restore();
     }
   };
 
@@ -405,7 +409,7 @@ document.addEventListener('DOMContentLoaded', function () {
       });
       chart.options.scales.y.max = abs ? yMax : 1;
       chart.options.scales.y.title.display = true;
-      chart.options.scales.y.title.text = abs ? upper('Relative irradiance (' + SPD_ABS_UNITS + ')') : 'NORMALIZED';
+      chart.options.scales.y.title.text = abs ? SPD_ABS_UNITS : 'NORMALIZED';
       chart.$melScale = abs ? yMax : 1;
       chart.update();
     }
