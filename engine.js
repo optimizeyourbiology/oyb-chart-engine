@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.0
+ * OYB Chart Engine — v1.1.4
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -15,6 +15,14 @@
 document.addEventListener('DOMContentLoaded', function () {
   var containers = document.querySelectorAll('.oyb-chart-container');
   if (!containers.length) return;
+
+  // Neutralize the theme's default button hover/focus (Kadence adds a blue halo) on our control pills/toggles.
+  if (!document.getElementById('oyb-chart-style')) {
+    var _st = document.createElement('style');
+    _st.id = 'oyb-chart-style';
+    _st.textContent = '.oyb-chart-controls button{box-shadow:none !important;outline:none !important;background-image:none !important;text-shadow:none !important;}.oyb-chart-controls button:hover,.oyb-chart-controls button:focus{box-shadow:none !important;outline:none !important;background-image:none !important;filter:none !important;}';
+    document.head.appendChild(_st);
+  }
 
   // ---------- palette / style ----------
   var PINK = '#FA4488', BLUE = '#3b82f6', GREEN = '#10b981', AMBER = '#f59e0b', RED = '#dc2626', GREY = '#9999B3';
@@ -115,6 +123,8 @@ document.addEventListener('DOMContentLoaded', function () {
   var AXIS_TITLE = function (text) {
     return { display: !!text, text: upper(text), font: AXIS_TITLE_FONT, color: AXIS_COLOR, padding: TITLE_PAD };
   };
+  // Force an even, round SPD wavelength axis (identical on single + multiple charts)
+  function spdTicks(scale) { scale.ticks = [380, 430, 480, 530, 580, 630, 680, 730, 780].map(function (v) { return { value: v }; }); }
 
   // ---------- plugins ----------
   var valueLabels = {
@@ -244,9 +254,9 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   function ieeeVerdict(pct, freq) {
     if (!freq || isNaN(freq)) return null;
-    if (pct <= ieeeNo(freq)) return { t: 'No effect', c: GREEN };
+    if (pct <= ieeeNo(freq)) return { t: 'No risk', c: GREEN };
     if (pct <= ieeeLow(freq)) return { t: 'Low risk', c: AMBER };
-    return { t: 'Risk', c: RED };
+    return { t: 'High risk', c: RED };
   }
   var ieeeLabelsPlugin = {
     id: 'ieeeLabels',
@@ -257,8 +267,8 @@ document.addEventListener('DOMContentLoaded', function () {
         ctx.save(); ctx.translate((x1 + x2) / 2, (y1 + y2) / 2); ctx.rotate(Math.atan2(y2 - y1, x2 - x1));
         ctx.font = "800 12px Nunito"; ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(text, 0, 5); ctx.restore();
       }
-      along(ieeeLow, 'Low effect limit', AMBER, 150, 650);
-      along(ieeeNo, 'No effect limit', GREEN, 260, 1400);
+      along(ieeeLow, 'Low effect limit', AMBER, 120, 320);
+      along(ieeeNo, 'No effect limit', GREEN, 700, 2500);
       ctx.save(); ctx.font = "800 13px Nunito"; ctx.fillStyle = RED; ctx.textAlign = 'center';
       ctx.fillText('High risk', xs.getPixelForValue(14), ys.getPixelForValue(55)); ctx.restore();
     }
@@ -280,8 +290,8 @@ document.addEventListener('DOMContentLoaded', function () {
         layout: { padding: horizontal ? { right: 44 } : { top: 22 } },
         plugins: { legend: { display: false }, tooltip: { enabled: false } },
         scales: {
-          x: { grid: { display: !horizontal ? false : true, color: GRID_COLOR }, ticks: { color: horizontal ? TICK_COLOR : NAVY, font: { weight: '800' } }, beginAtZero: horizontal, title: AXIS_TITLE(horizontal ? o.y : o.x) },
-          y: { grid: { display: horizontal ? false : true, color: GRID_COLOR }, ticks: { color: horizontal ? NAVY : TICK_COLOR, font: { weight: '800' } }, beginAtZero: !horizontal, title: AXIS_TITLE(horizontal ? o.x : o.y) }
+          x: { grid: { display: !horizontal ? false : true, color: GRID_COLOR }, ticks: { color: horizontal ? TICK_COLOR : NAVY, font: { weight: '800' }, autoSkip: false, maxRotation: horizontal ? 0 : 60 }, beginAtZero: horizontal, title: AXIS_TITLE(horizontal ? o.y : o.x) },
+          y: { grid: { display: horizontal ? false : true, color: GRID_COLOR }, ticks: { color: horizontal ? NAVY : TICK_COLOR, font: { weight: '800' }, autoSkip: false }, beginAtZero: !horizontal, title: AXIS_TITLE(horizontal ? o.x : o.y) }
         }
       },
       plugins: [valueLabels]
@@ -352,7 +362,7 @@ document.addEventListener('DOMContentLoaded', function () {
           interaction: { mode: 'index', intersect: false },
           plugins: { legend: { display: false }, tooltip: { enabled: false, external: spdSingleTip } },
           scales: {
-            x: { type: 'linear', min: startNM, max: endNM, grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), ticks: { color: TICK_COLOR, callback: function (v) { return v % 20 === 0 ? v : null; } } },
+            x: { type: 'linear', min: startNM, max: endNM, grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicks, ticks: { color: TICK_COLOR } },
             y: { min: 0, max: 1, display: false }
           }
         },
@@ -380,7 +390,7 @@ document.addEventListener('DOMContentLoaded', function () {
         plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', font: { weight: '800' } } },
           tooltip: { enabled: false, external: makeMultiTip(function (x) { return Math.round(x) + ' nm'; }, function (p) { return abs ? p.parsed.y.toFixed(2) : (p.parsed.y * 100).toFixed(0) + '%'; }) } },
         scales: {
-          x: { type: 'linear', min: Math.min.apply(null, nm), max: Math.max.apply(null, nm), grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x) },
+          x: { type: 'linear', min: Math.min.apply(null, nm), max: Math.max.apply(null, nm), grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicks, ticks: { color: TICK_COLOR } },
           y: { min: 0, beginAtZero: true, grid: { color: GRID_COLOR }, title: AXIS_TITLE('') }
         }
       },
@@ -394,6 +404,7 @@ document.addEventListener('DOMContentLoaded', function () {
         return { label: s.name, data: data, borderColor: s.color, backgroundColor: s.color, borderWidth: 2.5, pointRadius: 0, tension: 0.15, fill: false, clip: false };
       });
       chart.options.scales.y.max = abs ? yMax : 1;
+      chart.options.scales.y.title.display = true;
       chart.options.scales.y.title.text = abs ? upper('Relative irradiance (' + SPD_ABS_UNITS + ')') : 'NORMALIZED';
       chart.$melScale = abs ? yMax : 1;
       chart.update();
@@ -440,9 +451,9 @@ document.addEventListener('DOMContentLoaded', function () {
       var pct = o.flickerPercent !== '' && o.flickerPercent != null ? parseFloat(o.flickerPercent) : pctOf(parsed.datasets[0].data);
       var freq = o.flickerFrequency !== '' && o.flickerFrequency != null ? parseFloat(o.flickerFrequency) : null;
       var chips = document.createElement('div');
-      chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-family:Nunito,sans-serif;';
+      chips.style.cssText = 'display:flex;gap:10px;margin-top:14px;font-family:Nunito,sans-serif;';
       function chip(k, v, color) {
-        return '<div style="background:#fff;border:1px solid #f1e3e6;border-radius:12px;padding:8px 14px;min-width:90px;"><div style="font-size:11px;font-weight:800;letter-spacing:.4px;color:#94a3b8;text-transform:uppercase;">' + k + '</div><div style="font-size:18px;font-weight:900;color:' + (color || NAVY) + ';">' + v + '</div></div>';
+        return '<div style="flex:1;text-align:center;background:#fff;border:1px solid #f1e3e6;border-radius:12px;padding:8px 14px;"><div style="font-size:11px;font-weight:800;letter-spacing:.4px;color:#94a3b8;text-transform:uppercase;">' + k + '</div><div style="font-size:18px;font-weight:900;color:' + (color || NAVY) + ';">' + v + '</div></div>';
       }
       var html = '';
       if (pct != null && !isNaN(pct)) html += chip('% Flicker', (Math.round(pct * 10) / 10) + '%');
@@ -503,7 +514,7 @@ document.addEventListener('DOMContentLoaded', function () {
         responsive: true, maintainAspectRatio: false,
         plugins: {
           legend: { display: true, position: 'top', labels: { usePointStyle: true, font: { weight: '800' }, filter: function (item, data) { return !data.datasets[item.datasetIndex]._limit; } } },
-          tooltip: { enabled: true, backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#e2e8f0', padding: 12, cornerRadius: 12, usePointStyle: true, titleFont: { family: 'Nunito', weight: '800', size: 14 }, bodyFont: { family: 'Nunito', weight: '700', size: 13 }, filter: function (i) { return !i.chart.data.datasets[i.datasetIndex]._limit; }, callbacks: { title: function (items) { return items[0].dataset.label; }, label: function (i) { return i.parsed.y + '% depth @ ' + i.parsed.x + ' Hz'; } } }
+          tooltip: { enabled: true, backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#e2e8f0', padding: 12, cornerRadius: 12, displayColors: false, titleFont: { family: 'Nunito', weight: '800', size: 14 }, bodyFont: { family: 'Nunito', weight: '700', size: 13 }, filter: function (i) { return !i.chart.data.datasets[i.datasetIndex]._limit; }, callbacks: { title: function (items) { return items[0].dataset.label; }, label: function (i) { return i.parsed.y + '% depth @ ' + i.parsed.x + ' Hz'; } } }
         },
         scales: {
           x: { type: 'logarithmic', min: 1, max: 10000, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Flicker frequency (Hz)') },
