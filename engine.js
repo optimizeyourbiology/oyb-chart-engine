@@ -1,575 +1,545 @@
 /*
- * OYB Chart Engine
- * Canonical renderer for the WordPress charts (bar / line / spd / flicker).
+ * OYB Chart Engine — v1.1.0
+ * Canonical renderer for the WordPress charts.
+ * Types: bar · line · spd · flicker · flicker_risk
  *
- * Deploy path:  edit THIS file  ->  commit to GitHub  ->  served via jsDelivr
- *               ->  enqueued by the [oyb_chart] PHP shortcode (in WPCode).
+ * Deploy: edit here -> commit to github.com/optimizeyourbiology/oyb-chart-engine
+ *         -> publish release tag vX.Y.Z -> bump the @version in the WPCode PHP enqueue.
+ * Do NOT put chart JS back in WPCode (that is the WAF trap).
  *
- * IMPORTANT: This is now the single source of truth for the chart JS.
- * Do NOT edit the chart JavaScript in WPCode anymore — that snippet gets deleted
- * once this is live. Edit here, push, done.
- *
- * v1.0.0 — verbatim parity port of the existing WPCode JS. No behavior changes.
- *          Improvements (SPD two-mode, etc.) land as later commits.
+ * Reads container attributes emitted by the [oyb_chart] shortcode:
+ *   data-type, data-x, data-y, data-csv (base64),
+ *   data-highlight, data-units, data-distance,
+ *   data-flicker-percent, data-flicker-frequency
  */
+document.addEventListener('DOMContentLoaded', function () {
+  var containers = document.querySelectorAll('.oyb-chart-container');
+  if (!containers.length) return;
 
-document.addEventListener("DOMContentLoaded", function() {
+  // ---------- palette / style ----------
+  var PINK = '#FA4488', BLUE = '#3b82f6', GREEN = '#10b981', AMBER = '#f59e0b', RED = '#dc2626', GREY = '#9999B3';
+  var OYB = [PINK, BLUE, GREEN, AMBER, '#ef4444', '#8b5cf6', '#0f172a', '#06b6d4', '#84cc16', '#f97316'];
+  var GHOST = 'rgba(148,163,184,0.20)';
+  // built from char codes so the source stays pure ASCII and can't mojibake on the CDN -> renders "µW/cm²/nm"
+  var SPD_ABS_UNITS = String.fromCharCode(181) + 'W/cm' + String.fromCharCode(178) + '/nm';
+  var AXIS_COLOR = '#64748b', TICK_COLOR = '#64748b', GRID_COLOR = '#f1f5f9', NAVY = '#1d293b';
+  var AXIS_TITLE_FONT = { family: 'Nunito', weight: '700', size: 12 };
+  var TITLE_PAD = { top: 10, bottom: 4 };
+  var FOCUS_DEFAULT = 0.35, FOCUS_HI = 1.0, FOCUS_FADE = 0.08;
+  var FIXED_AXIS = { spd: { x: 'Wavelength (nm)', y: 'Relative Intensity' }, flicker: { x: 'Time (seconds)', y: 'Light Output' } };
+  var upper = function (s) { return (s || '').toUpperCase(); };
 
-    // Find all chart containers on the page
-    const chartContainers = document.querySelectorAll('.oyb-chart-container');
-    if (chartContainers.length === 0) return;
+  // melanopic action spectrum (CIE S 026), 380..780 step 5, peak-normalized, cleaned
+  var MEL = [0.00118,0.00212,0.00388,0.00728,0.014,0.0275,0.055,0.0936,0.16,0.215,0.289,0.36,0.446,0.521,0.602,0.677,0.753,0.826,0.895,0.945,0.984,0.999,0.998,0.98,0.945,0.893,0.827,0.746,0.658,0.568,0.479,0.395,0.318,0.25,0.192,0.143,0.103,0.073,0.0504,0.034,0.0227,0.0149,0.00977,0.00636,0.00413,0.00268,0.00175,0.00114,0.00075,0.00049,0.00032,0.00022,0.00014,0.0001,0.00007,0.00004,0.00003,0.00002,0.00001,0.00001,0.00001,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+  var MEL_NM = MEL.map(function (_, i) { return 380 + i * 5; });
 
-    // Helper to decode Base64 safely
-    function decodeBase64(str) {
-        try {
-            return decodeURIComponent(atob(str).split('').map(function(c) {
-                return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-            }).join(''));
-        } catch (e) {
-            return atob(str); // Fallback
-        }
+  // ---------- helpers ----------
+  function decodeBase64(str) {
+    try {
+      return decodeURIComponent(atob(str).split('').map(function (c) {
+        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+      }).join(''));
+    } catch (e) { return atob(str); }
+  }
+  function hexToRgba(hex, alpha) {
+    var h = hex.replace('#', '');
+    return 'rgba(' + parseInt(h.substr(0, 2), 16) + ',' + parseInt(h.substr(2, 2), 16) + ',' + parseInt(h.substr(4, 2), 16) + ',' + alpha + ')';
+  }
+  function nmToRGB(wl) {
+    var r = 0, g = 0, b = 0;
+    if (wl >= 380 && wl < 440) { r = -(wl - 440) / 60; b = 1; }
+    else if (wl >= 440 && wl < 490) { g = (wl - 440) / 50; b = 1; }
+    else if (wl >= 490 && wl < 510) { g = 1; b = -(wl - 510) / 20; }
+    else if (wl >= 510 && wl < 580) { r = (wl - 510) / 70; g = 1; }
+    else if (wl >= 580 && wl < 645) { r = 1; g = -(wl - 645) / 65; }
+    else if (wl >= 645 && wl <= 780) { r = 1; }
+    var f = 1;
+    if (wl >= 380 && wl < 420) f = 0.3 + 0.7 * (wl - 380) / 40;
+    else if (wl >= 701 && wl <= 780) f = 0.3 + 0.7 * (780 - wl) / 80;
+    else if (wl < 380 || wl > 780) f = 0.1;
+    return 'rgb(' + Math.round(r * f * 255) + ',' + Math.round(g * f * 255) + ',' + Math.round(b * f * 255) + ')';
+  }
+  var isMobile = function () { return window.matchMedia('(max-width: 768px)').matches; };
+
+  function parseCSV(raw) {
+    var rows = raw.trim().split(/\r?\n/).filter(function (r) { return r.trim() !== ''; });
+    var headers = rows[0].split(/,|\t/).map(function (h) { return h.trim(); });
+    var xLabels = [], datasets = [];
+    for (var i = 1; i < headers.length; i++) datasets.push({ label: headers[i], data: [] });
+    for (var r = 1; r < rows.length; r++) {
+      var cols = rows[r].split(/,|\t/);
+      if (cols.length < 2) continue;
+      xLabels.push(cols[0].trim());
+      for (var j = 1; j < cols.length; j++) {
+        var v = parseFloat(cols[j].trim());
+        datasets[j - 1].data.push(isNaN(v) ? null : v);
+      }
     }
+    return { headers: headers, xLabels: xLabels, datasets: datasets };
+  }
 
-    // Helper to calculate RGB from Wavelength
-    function nmToRGB(wl) {
-        let r=0, g=0, b=0;
-        if (wl>=380 && wl<440) { r = -(wl-440)/(440-380); b = 1.0; }
-        else if (wl>=440 && wl<490) { g = (wl-440)/(490-440); b = 1.0; }
-        else if (wl>=490 && wl<510) { g = 1.0; b = -(wl-510)/(510-490); }
-        else if (wl>=510 && wl<580) { r = (wl-510)/(580-510); g = 1.0; }
-        else if (wl>=580 && wl<645) { r = 1.0; g = -(wl-645)/(645-580); }
-        else if (wl>=645 && wl<=780) { r = 1.0; }
-        let factor = 1.0;
-        if (wl>=380 && wl<420) factor = 0.3 + 0.7*(wl-380)/(420-380);
-        else if (wl>=701 && wl<=780) factor = 0.3 + 0.7*(780-wl)/(780-700);
-        else if (wl < 380) factor = 0.1;
-        else if (wl > 780) factor = 0.1;
-        return `rgb(${Math.round(r*factor*255)}, ${Math.round(g*factor*255)}, ${Math.round(b*factor*255)})`;
+  // hero list from data-highlight (comma-separated labels, case-insensitive)
+  function heroList(attr) {
+    if (!attr) return [];
+    return attr.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+  }
+  function heroColorOf(label, heroes, fallback) {
+    var i = heroes.indexOf((label || '').trim().toLowerCase());
+    if (i === 0) return PINK;
+    if (i === 1) return BLUE;
+    if (i > 1) return OYB[i % OYB.length];
+    return fallback;
+  }
+
+  // ---------- shared UI ----------
+  function makeControls(container) {
+    var bar = document.createElement('div');
+    bar.className = 'oyb-chart-controls';
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;font-family:Nunito,sans-serif;';
+    container.parentNode.insertBefore(bar, container);
+    return bar;
+  }
+  function paintToggle(b, on) {
+    b.style.background = on ? PINK : '#fff';
+    b.style.borderColor = on ? PINK : '#e2b9c7';
+    b.style.color = on ? '#fff' : '#64748b';
+  }
+  function toggleBtn(label, on) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.textContent = label;
+    b.style.cssText = 'font-family:inherit;font-weight:800;font-size:12px;border:2px solid #e2b9c7;border-radius:999px;padding:5px 12px;cursor:pointer;';
+    paintToggle(b, !!on);
+    return b;
+  }
+
+  var AXIS_TITLE = function (text) {
+    return { display: !!text, text: upper(text), font: AXIS_TITLE_FONT, color: AXIS_COLOR, padding: TITLE_PAD };
+  };
+
+  // ---------- plugins ----------
+  var valueLabels = {
+    id: 'valueLabels',
+    afterDatasetsDraw: function (chart) {
+      if (!chart.$valueLabels) return;
+      var ctx = chart.ctx, horiz = chart.options.indexAxis === 'y', unit = chart.$valueUnit || '';
+      ctx.save(); ctx.font = "800 12px Nunito"; ctx.fillStyle = '#475569';
+      chart.data.datasets.forEach(function (ds, di) {
+        chart.getDatasetMeta(di).data.forEach(function (el, i) {
+          var v = ds.data[i]; if (v == null) return;
+          if (horiz) { ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(v + unit, el.x + 8, el.y); }
+          else { ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText(v + unit, el.x, el.y - 6); }
+        });
+      });
+      ctx.restore();
     }
+  };
 
-    // Standard Brand Colors (pink first as the default/featured color)
-    const oybColors = ['#FA4488', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#0f172a', '#06b6d4', '#84cc16', '#f97316'];
-    // Two-dataset color pair (pink + blue)
-    const twoDatasetColors = ['#FA4488', '#3b82f6'];
-    // Neutral pill colors (used when pill is unpinned)
-    const PILL_NEUTRAL_BORDER = '#cbd5e1';
-    const PILL_NEUTRAL_TEXT   = '#64748b';
+  var melLayer = {
+    id: 'melLayer',
+    afterDatasetsDraw: function (chart) {
+      if (!chart.$showMel) return;
+      var xs = chart.scales.x, ys = chart.scales.y, ctx = chart.ctx, a = chart.chartArea, s = chart.$melScale || 1;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(a.left, a.top, a.right - a.left, a.bottom - a.top); ctx.clip();
+      ctx.beginPath();
+      MEL_NM.forEach(function (nm, i) { var px = xs.getPixelForValue(nm), py = ys.getPixelForValue(MEL[i] * s); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+      ctx.lineTo(xs.getPixelForValue(MEL_NM[MEL_NM.length - 1]), ys.getPixelForValue(0));
+      ctx.lineTo(xs.getPixelForValue(MEL_NM[0]), ys.getPixelForValue(0));
+      ctx.closePath(); ctx.fillStyle = 'rgba(15,23,42,0.06)'; ctx.fill();
+      ctx.beginPath();
+      MEL_NM.forEach(function (nm, i) { var px = xs.getPixelForValue(nm), py = ys.getPixelForValue(MEL[i] * s); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+      ctx.setLineDash([5, 4]); ctx.strokeStyle = 'rgba(15,23,42,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.restore();
+    }
+  };
 
-    // Axis styling shared across all chart types
-    const AXIS_LABEL_COLOR = '#64748b';
-    const AXIS_TICK_COLOR  = '#64748b';
-    const AXIS_GRID_COLOR  = '#f1f5f9';
-    const AXIS_TITLE_FONT = {
-        family: 'Nunito',
-        weight: '700',
-        size: 12
+  // ---------- SPD tooltips (ported) ----------
+  function spdTipEl() {
+    var el = document.getElementById('oyb-spd-tip'); if (el) return el;
+    el = document.createElement('div'); el.id = 'oyb-spd-tip';
+    el.innerHTML = '<div style="font-weight:800;font-size:15px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;gap:24px;"><span class="t"></span><span class="d" style="width:12px;height:12px;border-radius:50%;box-shadow:0 0 4px rgba(0,0,0,0.5);"></span></div><div style="font-size:11px;color:#94a3b8;margin-bottom:6px;text-transform:uppercase;font-weight:800;letter-spacing:.5px;">Intensity</div><div style="display:flex;align-items:center;gap:10px;"><div style="flex-grow:1;background:#334155;height:6px;border-radius:3px;overflow:hidden;width:120px;"><div class="b" style="height:100%;border-radius:3px;transition:width .1s ease;"></div></div><span class="v" style="font-weight:800;font-size:13px;"></span></div><div style="position:absolute;bottom:-8px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-top:8px solid #1e293b;"></div>';
+    el.style.cssText = 'opacity:0;position:absolute;background:#1e293b;color:#fff;border-radius:12px;padding:12px 14px;pointer-events:none;transform:translate(-50%,calc(-100% - 15px));transition:opacity .1s ease,top .1s ease,left .1s ease;box-shadow:0 10px 25px rgba(0,0,0,0.3);z-index:1000;min-width:170px;font-family:Nunito,sans-serif;';
+    document.body.appendChild(el); return el;
+  }
+  function spdSingleTip(ctx) {
+    var el = spdTipEl(), tt = ctx.tooltip; if (tt.opacity === 0) { el.style.opacity = 0; return; }
+    var dp = (tt.dataPoints || [])[0]; if (!dp) return;
+    var wl = Math.round(dp.parsed.x), inten = Math.max(0, Math.min(100, dp.parsed.y * 100)), c = nmToRGB(wl);
+    el.querySelector('.t').innerText = wl + ' nm';
+    el.querySelector('.v').innerText = inten.toFixed(1) + '%';
+    el.querySelector('.d').style.backgroundColor = c;
+    el.querySelector('.b').style.width = inten + '%';
+    el.querySelector('.b').style.backgroundColor = c;
+    var pos = ctx.chart.canvas.getBoundingClientRect();
+    el.style.opacity = 1; el.style.left = pos.left + window.scrollX + tt.caretX + 'px'; el.style.top = pos.top + window.scrollY + tt.caretY + 'px';
+  }
+  function multiTipEl() {
+    var el = document.getElementById('oyb-multi-tip'); if (el) return el;
+    el = document.createElement('div'); el.id = 'oyb-multi-tip';
+    el.style.cssText = 'opacity:0;position:absolute;background:#1e293b;color:#fff;border-radius:12px;padding:12px 14px;pointer-events:none;transform:translate(-50%,calc(-100% - 15px));transition:opacity .1s ease,top .1s ease,left .1s ease;box-shadow:0 10px 25px rgba(0,0,0,0.3);z-index:1000;min-width:180px;font-family:Nunito,sans-serif;';
+    document.body.appendChild(el); return el;
+  }
+  function makeMultiTip(fmt, unitLabel) {
+    return function (ctx) {
+      var el = multiTipEl(), tt = ctx.tooltip; if (tt.opacity === 0) { el.style.opacity = 0; return; }
+      var pts = tt.dataPoints || []; if (!pts.length) return;
+      var head = fmt(pts[0].parsed.x);
+      var rows = pts.map(function (p) {
+        var v = unitLabel(p);
+        return '<div style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:5px;"><span style="width:10px;height:10px;border-radius:50%;background:' + p.dataset.borderColor + '"></span><span style="flex:1;padding-right:14px;">' + p.dataset.label + '</span><b>' + v + '</b></div>';
+      }).join('');
+      el.innerHTML = '<div style="font-weight:800;font-size:15px;">' + head + '</div>' + rows;
+      var pos = ctx.chart.canvas.getBoundingClientRect();
+      el.style.opacity = 1; el.style.left = pos.left + window.scrollX + tt.caretX + 'px'; el.style.top = pos.top + window.scrollY + tt.caretY + 'px';
     };
-    const formatAxisTitle = (label) => (label || '').toUpperCase();
-    const AXIS_TITLE_PADDING = { top: 10, bottom: 4 };
+  }
 
-    // Opacity levels applied to line stroke based on focus state
-    const FOCUS_DEFAULT_ALPHA   = 0.35; // All lines at rest (nothing pinned, nothing hovered)
-    const FOCUS_HIGHLIGHT_ALPHA = 1.0;  // Pinned or hovered line
-    const FOCUS_FADED_ALPHA     = 0.08; // Lines that are neither pinned nor hovered when something else is
-
-    // Hard-coded axis labels for fixed-meaning chart types
-    const FIXED_AXIS_LABELS = {
-        spd:     { x: 'Wavelength (nm)', y: 'Relative Intensity' },
-        flicker: { x: 'Time (seconds)',  y: 'Light Output' }
-    };
-
-    // Helper: convert hex color to rgba with alpha
-    function hexToRgba(hex, alpha) {
-        const h = hex.replace('#', '');
-        const r = parseInt(h.substring(0, 2), 16);
-        const g = parseInt(h.substring(2, 4), 16);
-        const b = parseInt(h.substring(4, 6), 16);
-        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    }
-
-    // Mobile detection (matches the 768px breakpoint in the PHP CSS)
-    const isMobile = () => window.matchMedia('(max-width: 768px)').matches;
-
-    // Repaint all datasets based on the current set of pinned + hovered indices.
-    //   - If pinnedSet is empty AND hoveredIndex < 0: all lines at FOCUS_DEFAULT_ALPHA
-    //   - If pinnedSet is empty AND a hover exists: hovered at HIGHLIGHT, rest stay at DEFAULT
-    //   - Otherwise (pins exist): highlighted = pinned ∪ {hovered}; everything else fades
-    function applyFocus(chartInstance, pinnedSet, hoveredIndex) {
-        const hasPins  = pinnedSet.size > 0;
-        const hasHover = hoveredIndex >= 0;
-        chartInstance.data.datasets.forEach((ds, i) => {
-            if (!ds._sourceHex) return;
-            let alpha;
-            if (!hasPins && !hasHover) {
-                alpha = FOCUS_DEFAULT_ALPHA;
-            } else if (!hasPins && hasHover) {
-                alpha = (i === hoveredIndex) ? FOCUS_HIGHLIGHT_ALPHA : FOCUS_DEFAULT_ALPHA;
-            } else if (pinnedSet.has(i) || i === hoveredIndex) {
-                alpha = FOCUS_HIGHLIGHT_ALPHA;
-            } else {
-                alpha = FOCUS_FADED_ALPHA;
-            }
-            ds.borderColor = hexToRgba(ds._sourceHex, alpha);
-        });
-        chartInstance.update('none');
-    }
-
-    // Build a pill for a multi-dataset chart with pin-on-click and preview-on-hover behavior.
-    // Shares a `pinnedSet` across all pills in the same chart.
-    function buildPill(chartInstance, pinnedSet, refreshAllPills, ds, index) {
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.textContent = ds.label;
-        pill.dataset.datasetIndex = index;
-
-        const color = ds._sourceHex || ds.borderColor;
-        const fadedColor = hexToRgba(color, 0.35);
-
-        // Repaint just THIS pill based on its current pinned state and hover state.
-        const applyStyle = (pinned, hovered) => {
-            const shadowColor = hexToRgba(color, 0.35);
-            // Inactive pills show their line color faded so they're identifiable on mobile.
-            // Hover or pin brings them to full color.
-            const active = pinned || hovered;
-            const borderColor = active ? color : fadedColor;
-            const textColor   = pinned ? '#ffffff' : (hovered ? color : fadedColor);
-            const bgColor     = pinned ? color : 'transparent';
-            Object.assign(pill.style, {
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '4px 10px',
-                border: `2px solid ${borderColor}`,
-                borderRadius: '999px',
-                background: bgColor,
-                color: textColor,
-                fontFamily: "'Nunito', sans-serif",
-                fontWeight: '700',
-                fontSize: '13px',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-                opacity: '1',
-                boxShadow: hovered && pinned ? `0 4px 12px ${shadowColor}` : 'none',
-                outline: 'none',
-                transform: hovered ? 'translateY(-1px)' : 'translateY(0)'
-            });
-        };
-
-        // Expose the repaint method so the parent can refresh pills when pins change elsewhere
-        pill._refresh = (hovered) => applyStyle(pinnedSet.has(index), hovered || false);
-
-        // Initial render: nothing pinned, not hovered
-        applyStyle(false, false);
-
-        // Click: toggle this index in the pinned set, then repaint everything
-        pill.addEventListener('click', () => {
-            if (pinnedSet.has(index)) {
-                pinnedSet.delete(index);
-            } else {
-                pinnedSet.add(index);
-            }
-            refreshAllPills();
-            applyFocus(chartInstance, pinnedSet, index); // index is currently hovered too
-        });
-
-        // Hover: preview this dataset (in addition to anything already pinned)
-        pill.addEventListener('mouseenter', () => {
-            applyStyle(pinnedSet.has(index), true);
-            applyFocus(chartInstance, pinnedSet, index);
-        });
-        pill.addEventListener('mouseleave', () => {
-            applyStyle(pinnedSet.has(index), false);
-            applyFocus(chartInstance, pinnedSet, -1);
-        });
-        pill.addEventListener('focus', () => {
-            applyStyle(pinnedSet.has(index), true);
-            applyFocus(chartInstance, pinnedSet, index);
-        });
-        pill.addEventListener('blur', () => {
-            applyStyle(pinnedSet.has(index), false);
-            applyFocus(chartInstance, pinnedSet, -1);
-        });
-
-        return pill;
-    }
-
-    // Loop through each chart container and draw it
-    chartContainers.forEach(container => {
-        const canvas = container.querySelector('canvas');
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        const chartType = container.getAttribute('data-type');
-        const fixed = FIXED_AXIS_LABELS[chartType];
-        const customXLabel = fixed ? fixed.x : container.getAttribute('data-x');
-        const customYLabel = fixed ? fixed.y : container.getAttribute('data-y');
-        const rawCsv = decodeBase64(container.getAttribute('data-csv'));
-        if (!rawCsv.trim()) return;
-
-        // --- 1. PARSE CSV ---
-        const rows = rawCsv.trim().split(/\r?\n/).filter(row => row.trim() !== '');
-        const headers = rows[0].split(/,|\t/).map(h => h.trim());
-        let xLabels = [];
-        const datasets = [];
-        for (let i = 1; i < headers.length; i++) {
-            datasets.push({ label: headers[i], data: [] });
-        }
-        for (let i = 1; i < rows.length; i++) {
-            const cols = rows[i].split(/,|\t/);
-            if (cols.length >= 2) {
-                xLabels.push(cols[0].trim());
-                for (let j = 1; j < cols.length; j++) {
-                    let val = parseFloat(cols[j].trim());
-                    datasets[j-1].data.push(isNaN(val) ? null : val);
-                }
-            }
-        }
-
-        let chartConfig = {};
-
-        // --- 2. APPLY TEMPLATES ---
-        if (chartType === 'spd') {
-            let spdData = datasets[0].data;
-            const maxVal = Math.max(...spdData);
-            if (maxVal > 0) spdData = spdData.map(v => v / maxVal);
-
-            xLabels = spdData.map((_, i) => 380 + i);
-            const startNM = 380;
-            const endNM = startNM + spdData.length - 1;
-            chartConfig = {
-                type: 'line',
-                data: {
-                    labels: xLabels,
-                    datasets: [{
-                        data: spdData,
-                        borderColor: 'transparent',
-                        borderWidth: 0,
-                        fill: true,
-                        pointRadius: 0,
-                        tension: 0.1,
-                        backgroundColor: function(context) {
-                            const chartArea = context.chart.chartArea;
-                            if (!chartArea) return 'rgba(0,0,0,0.1)';
-                            const gradient = ctx.createLinearGradient(chartArea.left, 0, chartArea.right, 0);
-                            const getPos = nm => Math.max(0, Math.min(1, (nm - startNM) / (endNM - startNM)));
-                            gradient.addColorStop(0, "rgba(75, 0, 130, 1)");
-                            gradient.addColorStop(getPos(450), "rgba(0, 0, 255, 1)");
-                            gradient.addColorStop(getPos(490), "rgba(0, 255, 255, 1)");
-                            gradient.addColorStop(getPos(530), "rgba(0, 255, 0, 1)");
-                            gradient.addColorStop(getPos(580), "rgba(255, 255, 0, 1)");
-                            gradient.addColorStop(getPos(620), "rgba(255, 127, 0, 1)");
-                            gradient.addColorStop(getPos(700), "rgba(255, 0, 0, 1)");
-                            gradient.addColorStop(1, "rgba(100, 0, 0, 1)");
-                            return gradient;
-                        }
-                    }]
-                },
-                options: {
-                    responsive: true, maintainAspectRatio: false,
-                    interaction: { mode: 'index', intersect: false },
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: {
-                            enabled: false,
-                            external: function(context) {
-                                let tooltipEl = document.getElementById('chartjs-spd-tooltip');
-                                if (!tooltipEl) {
-                                    tooltipEl = document.createElement('div');
-                                    tooltipEl.id = 'chartjs-spd-tooltip';
-                                    tooltipEl.innerHTML = `
-                                        <div style="font-weight: 800; font-size: 14px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
-                                            <span id="spd-tt-title"></span>
-                                            <span id="spd-tt-dot" style="width: 12px; height: 12px; border-radius: 50%; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></span>
-                                        </div>
-                                        <div style="font-size: 11px; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px;">Intensity</div>
-                                        <div style="display: flex; align-items: center; gap: 10px;">
-                                            <div style="flex-grow: 1; background: #334155; height: 6px; border-radius: 3px; overflow: hidden; width: 100px;">
-                                                <div id="spd-tt-bar" style="height: 100%; border-radius: 3px; transition: width 0.1s ease;"></div>
-                                            </div>
-                                            <span id="spd-tt-val" style="font-weight: 700; font-size: 13px;"></span>
-                                        </div>
-                                        <div style="position: absolute; bottom: -8px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 8px solid #1e293b;"></div>
-                                    `;
-
-                                    Object.assign(tooltipEl.style, {
-                                        opacity: 0,
-                                        position: 'absolute',
-                                        background: '#1e293b',
-                                        color: '#ffffff',
-                                        borderRadius: '12px',
-                                        padding: '12px',
-                                        pointerEvents: 'none',
-                                        transform: 'translate(-50%, calc(-100% - 15px))',
-                                        transition: 'opacity 0.1s ease, top 0.1s ease, left 0.1s ease',
-                                        boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
-                                        zIndex: 1000,
-                                        minWidth: '150px',
-                                        fontFamily: "'Nunito', sans-serif"
-                                    });
-                                    document.body.appendChild(tooltipEl);
-                                }
-                                const tooltipModel = context.tooltip;
-                                if (tooltipModel.opacity === 0) {
-                                    tooltipEl.style.opacity = 0;
-                                    return;
-                                }
-                                if (tooltipModel.body) {
-                                    const dataIndex = tooltipModel.dataPoints[0].dataIndex;
-                                    const wl = xLabels[dataIndex];
-
-                                    let intensity = spdData[dataIndex] * 100;
-                                    intensity = Math.max(0, Math.min(100, intensity));
-
-                                    const wlColor = nmToRGB(wl);
-                                    tooltipEl.querySelector('#spd-tt-title').innerText = wl + ' nm';
-                                    tooltipEl.querySelector('#spd-tt-val').innerText = intensity.toFixed(1) + '%';
-
-                                    tooltipEl.querySelector('#spd-tt-dot').style.backgroundColor = wlColor;
-                                    tooltipEl.querySelector('#spd-tt-bar').style.width = intensity + '%';
-                                    tooltipEl.querySelector('#spd-tt-bar').style.backgroundColor = wlColor;
-                                }
-                                const position = context.chart.canvas.getBoundingClientRect();
-                                tooltipEl.style.opacity = 1;
-                                tooltipEl.style.left = position.left + window.scrollX + tooltipModel.caretX + 'px';
-                                tooltipEl.style.top = position.top + window.scrollY + tooltipModel.caretY + 'px';
-                            }
-                        }
-                    },
-                    scales: {
-                        x: {
-                            title: { display: true, text: formatAxisTitle(customXLabel), font: AXIS_TITLE_FONT, color: AXIS_LABEL_COLOR, padding: AXIS_TITLE_PADDING },
-                            grid: { display: false },
-                            ticks: {
-                                color: AXIS_TICK_COLOR,
-                                callback: function(val, index) {
-                                    const nm = xLabels[index];
-                                    return nm % 20 === 0 ? nm : null;
-                                }
-                            }
-                        },
-                        y: {
-                            min: 0, max: 1.0,
-                            display: false
-                        }
-                    }
-                }
-            };
-        }
-
-        else if (chartType === 'flicker') {
-            const datasetCount = datasets.length;
-
-            let palette;
-            if (datasetCount === 2) {
-                palette = twoDatasetColors;
-            } else {
-                palette = oybColors;
-            }
-            const flickerBorderWidth = isMobile() ? 1 : 1.5;
-            const useFocusMode = datasetCount >= 3;
-            datasets.forEach((ds, index) => {
-                const color = palette[index % palette.length];
-                ds._sourceHex = color;
-                ds.borderColor = useFocusMode ? hexToRgba(color, FOCUS_DEFAULT_ALPHA) : color;
-                ds.backgroundColor = color;
-                ds.fill = false;
-                ds.borderWidth = flickerBorderWidth;
-                ds.pointRadius = 0;
-                ds.pointHoverRadius = 0;
-                ds.pointBackgroundColor = color;
-                ds.pointBorderColor = color;
-                ds.tension = 0.1;
-                let xyData = [];
-                for (let k = 0; k < ds.data.length; k++) {
-                    if (ds.data[k] !== null && ds.data[k] !== undefined && !isNaN(parseFloat(xLabels[k]))) {
-                        xyData.push({ x: parseFloat(xLabels[k]), y: ds.data[k] });
-                    }
-                }
-                ds.data = xyData;
-            });
-
-            // Legend rules:
-            //   1 dataset  -> no legend
-            //   2 datasets -> native Chart.js legend
-            //   3+         -> hide native legend, use custom pills
-            let showNativeLegend;
-            if (datasetCount === 1) showNativeLegend = false;
-            else if (datasetCount === 2) showNativeLegend = true;
-            else showNativeLegend = false;
-
-            chartConfig = {
-                type: 'line',
-                data: { datasets: datasets },
-                options: {
-                    responsive: true, maintainAspectRatio: false,
-                    interaction: { mode: 'nearest', axis: 'x', intersect: false },
-                    plugins: {
-                        legend: {
-                            display: showNativeLegend,
-                            position: 'top',
-                            labels: {
-                                font: { family: 'Nunito', weight: '700' },
-                                usePointStyle: true,
-                                pointStyle: 'circle',
-                                boxPadding: 6,
-                                padding: 16
-                            }
-                        },
-                        tooltip: {
-                            enabled: false
-                        }
-                    },
-                    scales: {
-                        x: {
-                            type: 'linear',
-                            min: 0,
-                            max: 0.1,
-                            title: { display: true, text: formatAxisTitle(customXLabel), font: AXIS_TITLE_FONT, color: AXIS_LABEL_COLOR, padding: AXIS_TITLE_PADDING },
-                            grid: { display: false },
-                            ticks: {
-                                color: AXIS_TICK_COLOR,
-                                stepSize: 0.01,
-                                callback: function(value) {
-                                    return Number(value.toFixed(2)) + 's';
-                                }
-                            }
-                        },
-                        y: {
-                            min: 0,
-                            max: 1,
-                            title: { display: true, text: formatAxisTitle(customYLabel), font: AXIS_TITLE_FONT, color: AXIS_LABEL_COLOR, padding: AXIS_TITLE_PADDING },
-                            grid: { color: AXIS_GRID_COLOR },
-                            ticks: {
-                                color: AXIS_TICK_COLOR,
-                                stepSize: 0.2,
-                                callback: function(value) {
-                                    return Math.round(value * 100) + '%';
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-        }
-        else if (chartType === 'line') {
-            const datasetCount = datasets.length;
-            const lineBorderWidth = isMobile() ? 2.5 : 3.5;
-            const useFocusMode = datasetCount >= 2;
-            datasets.forEach((ds, index) => {
-                const color = oybColors[index % oybColors.length];
-                ds._sourceHex = color;
-                ds.borderColor = useFocusMode ? hexToRgba(color, FOCUS_DEFAULT_ALPHA) : color;
-                ds.backgroundColor = color;
-                ds.fill = false;
-                ds.borderWidth = lineBorderWidth;
-                ds.borderCapStyle = 'round';
-                ds.borderJoinStyle = 'round';
-                ds.pointRadius = 0;
-                ds.pointHoverRadius = 0;
-                ds.tension = 0.3;
-            });
-            chartConfig = {
-                type: 'line',
-                data: { labels: xLabels, datasets: datasets },
-                options: {
-                    responsive: true, maintainAspectRatio: false,
-                    interaction: { mode: 'index', intersect: false },
-                    plugins: {
-                        legend: {
-                            display: false
-                        },
-                        tooltip: {
-                            enabled: false
-                        }
-                    },
-                    scales: {
-                        x: {
-                            title: { display: !!customXLabel, text: formatAxisTitle(customXLabel), font: AXIS_TITLE_FONT, color: AXIS_LABEL_COLOR, padding: AXIS_TITLE_PADDING },
-                            grid: { display: false },
-                            ticks: { color: AXIS_TICK_COLOR }
-                        },
-                        y: {
-                            beginAtZero: true,
-                            title: { display: !!customYLabel, text: formatAxisTitle(customYLabel), font: AXIS_TITLE_FONT, color: AXIS_LABEL_COLOR, padding: AXIS_TITLE_PADDING },
-                            grid: { color: AXIS_GRID_COLOR },
-                            ticks: { color: AXIS_TICK_COLOR }
-                        }
-                    }
-                }
-            };
-        }
-        else if (chartType === 'bar') {
-            datasets.forEach((ds, index) => {
-                ds.backgroundColor = '#9999B3';
-                ds.hoverBackgroundColor = '#FA4488';
-                ds.borderRadius = 8;
-                ds.borderSkipped = 'bottom';
-            });
-            chartConfig = {
-                type: 'bar',
-                data: { labels: xLabels, datasets: datasets },
-                options: {
-                    responsive: true, maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: {
-                            backgroundColor: '#1D293B', displayColors: false, padding: 12,
-                            titleColor: '#94a3b8', titleFont: { family: 'Nunito', weight: '800' },
-                            bodyFont: { family: 'Nunito', size: 15, weight: '800' },
-                            callbacks: {
-                                title: context => (context[0].label || '').toUpperCase(),
-                                label: context => context.parsed.y + ' ' + (customYLabel ? customYLabel.toLowerCase() : context.dataset.label.toLowerCase())
-                            }
-                        }
-                    },
-                    scales: {
-                        x: {
-                            title: { display: !!customXLabel, text: formatAxisTitle(customXLabel), font: AXIS_TITLE_FONT, color: AXIS_LABEL_COLOR, padding: AXIS_TITLE_PADDING },
-                            grid: { display: false },
-                            ticks: { color: AXIS_TICK_COLOR }
-                        },
-                        y: {
-                            title: { display: !!customYLabel, text: formatAxisTitle(customYLabel), font: AXIS_TITLE_FONT, color: AXIS_LABEL_COLOR, padding: AXIS_TITLE_PADDING },
-                            beginAtZero: true,
-                            grid: { color: AXIS_GRID_COLOR },
-                            ticks: { color: AXIS_TICK_COLOR }
-                        }
-                    }
-                }
-            };
-        }
-
-        // --- 3. DRAW ---
-        if (Object.keys(chartConfig).length !== 0) {
-            const chartInstance = new Chart(ctx, chartConfig);
-
-            // --- 4. BUILD PILL CONTROLS with pin-on-click + preview-on-hover ---
-            let shouldBuildPills = false;
-            if (chartType === 'flicker' && datasets.length >= 3) shouldBuildPills = true;
-            else if (chartType === 'line' && datasets.length >= 2) shouldBuildPills = true;
-
-            if (shouldBuildPills) {
-                const pinnedSet = new Set();
-                const pills = [];
-                // Called when pin state changes so every pill can repaint its border/fill
-                const refreshAllPills = () => {
-                    pills.forEach(p => p._refresh(false));
-                };
-                const pillContainer = document.createElement('div');
-                pillContainer.className = 'oyb-chart-pills';
-                Object.assign(pillContainer.style, {
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '6px',
-                    marginBottom: '16px',
-                    fontFamily: "'Nunito', sans-serif"
-                });
-                datasets.forEach((ds, index) => {
-                    const pill = buildPill(chartInstance, pinnedSet, refreshAllPills, ds, index);
-                    pills.push(pill);
-                    pillContainer.appendChild(pill);
-                });
-                container.parentNode.insertBefore(pillContainer, container);
-            }
-        }
+  // ---------- focus + pills (line) ----------
+  function applyFocus(chart, pinned, hovered) {
+    var hasPins = pinned.size > 0, hasHover = hovered >= 0;
+    chart.data.datasets.forEach(function (ds, i) {
+      if (!ds._hex) return;
+      var alpha;
+      if (!hasPins && !hasHover) alpha = FOCUS_DEFAULT;
+      else if (!hasPins && hasHover) alpha = (i === hovered) ? FOCUS_HI : FOCUS_DEFAULT;
+      else if (pinned.has(i) || i === hovered) alpha = FOCUS_HI;
+      else alpha = FOCUS_FADE;
+      ds.borderColor = hexToRgba(ds._hex, alpha);
     });
+    chart.update('none');
+  }
+  function buildPill(chart, pinned, refresh, ds, index) {
+    var pill = document.createElement('button');
+    pill.type = 'button'; pill.textContent = ds.label;
+    var color = ds._hex || ds.borderColor, faded = hexToRgba(color, 0.35);
+    function style(p, h) {
+      var active = p || h;
+      Object.assign(pill.style, {
+        display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px',
+        border: '2px solid ' + (active ? color : faded), borderRadius: '999px',
+        background: p ? color : 'transparent', color: p ? '#fff' : (h ? color : faded),
+        fontFamily: 'Nunito, sans-serif', fontWeight: '700', fontSize: '13px', cursor: 'pointer',
+        transition: 'all .15s ease', transform: h ? 'translateY(-1px)' : 'translateY(0)'
+      });
+    }
+    pill._refresh = function (h) { style(pinned.has(index), h || false); };
+    style(false, false);
+    pill.addEventListener('click', function () { pinned.has(index) ? pinned.delete(index) : pinned.add(index); refresh(); applyFocus(chart, pinned, index); });
+    pill.addEventListener('mouseenter', function () { style(pinned.has(index), true); applyFocus(chart, pinned, index); });
+    pill.addEventListener('mouseleave', function () { style(pinned.has(index), false); applyFocus(chart, pinned, -1); });
+    return pill;
+  }
+
+  // ---------- IEEE 1789 ----------
+  function ieeeNo(f) { return Math.min(100, f < 90 ? 0.01 * f : 0.0333 * f); }
+  function ieeeLow(f) { return Math.min(100, Math.max(0.2, f < 90 ? 0.025 * f : 0.08 * f)); }
+  function ieeeClamp(v) { return Math.max(0.05, Math.min(100, v)); }
+  function ieeeCurve(fn) {
+    var p = [], f;
+    for (f = 1; f < 90; f *= 1.15) p.push({ x: f, y: ieeeClamp(fn(f)) });
+    p.push({ x: 89.99, y: ieeeClamp(fn(89.99)) });
+    for (f = 90; f < 10000; f *= 1.15) p.push({ x: f, y: ieeeClamp(fn(f)) });
+    p.push({ x: 10000, y: ieeeClamp(fn(10000)) });
+    return p;
+  }
+  function ieeeVerdict(pct, freq) {
+    if (!freq || isNaN(freq)) return null;
+    if (pct <= ieeeNo(freq)) return { t: 'No effect', c: GREEN };
+    if (pct <= ieeeLow(freq)) return { t: 'Low risk', c: AMBER };
+    return { t: 'Risk', c: RED };
+  }
+  var ieeeLabelsPlugin = {
+    id: 'ieeeLabels',
+    afterDatasetsDraw: function (chart) {
+      var xs = chart.scales.x, ys = chart.scales.y, ctx = chart.ctx;
+      function along(fn, text, color, fA, fB) {
+        var x1 = xs.getPixelForValue(fA), y1 = ys.getPixelForValue(fn(fA)), x2 = xs.getPixelForValue(fB), y2 = ys.getPixelForValue(fn(fB));
+        ctx.save(); ctx.translate((x1 + x2) / 2, (y1 + y2) / 2); ctx.rotate(Math.atan2(y2 - y1, x2 - x1));
+        ctx.font = "800 12px Nunito"; ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(text, 0, 5); ctx.restore();
+      }
+      along(ieeeLow, 'Low effect limit', AMBER, 150, 650);
+      along(ieeeNo, 'No effect limit', GREEN, 260, 1400);
+      ctx.save(); ctx.font = "800 13px Nunito"; ctx.fillStyle = RED; ctx.textAlign = 'center';
+      ctx.fillText('High risk', xs.getPixelForValue(14), ys.getPixelForValue(55)); ctx.restore();
+    }
+  };
+
+  // ================= RENDERERS =================
+
+  function renderBar(container, canvas, parsed, o) {
+    var labels = parsed.xLabels, ds = parsed.datasets[0] || { data: [] };
+    var heroes = heroList(o.highlight);
+    var horizontal = labels.length > 6 || isMobile();
+    var colors = labels.map(function (l) { return heroColorOf(l, heroes, GREY); });
+    var chart = new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: { labels: labels, datasets: [{ data: ds.data, backgroundColor: colors, hoverBackgroundColor: PINK, borderRadius: 8, borderSkipped: horizontal ? false : 'bottom' }] },
+      options: {
+        indexAxis: horizontal ? 'y' : 'x',
+        responsive: true, maintainAspectRatio: false,
+        layout: { padding: horizontal ? { right: 44 } : { top: 22 } },
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { grid: { display: !horizontal ? false : true, color: GRID_COLOR }, ticks: { color: horizontal ? TICK_COLOR : NAVY, font: { weight: '800' } }, beginAtZero: horizontal, title: AXIS_TITLE(horizontal ? o.y : o.x) },
+          y: { grid: { display: horizontal ? false : true, color: GRID_COLOR }, ticks: { color: horizontal ? NAVY : TICK_COLOR, font: { weight: '800' } }, beginAtZero: !horizontal, title: AXIS_TITLE(horizontal ? o.x : o.y) }
+        }
+      },
+      plugins: [valueLabels]
+    });
+    chart.$valueLabels = true; chart.$valueUnit = ''; chart.update();
+  }
+
+  function renderLine(container, canvas, parsed, o) {
+    var heroes = heroList(o.highlight);
+    var count = parsed.datasets.length;
+    var focus = count >= 2;
+    var lw = isMobile() ? 2.5 : 3.5;
+    parsed.datasets.forEach(function (dsi, index) {
+      var color = OYB[index % OYB.length];
+      dsi._hex = color;
+      dsi.borderColor = focus ? hexToRgba(color, FOCUS_DEFAULT) : color;
+      dsi.backgroundColor = color; dsi.fill = false; dsi.borderWidth = lw;
+      dsi.borderCapStyle = 'round'; dsi.borderJoinStyle = 'round';
+      dsi.pointRadius = 0; dsi.pointHoverRadius = 0; dsi.tension = 0.3;
+    });
+    var chart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { labels: parsed.xLabels, datasets: parsed.datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { grid: { display: false }, ticks: { color: TICK_COLOR }, title: AXIS_TITLE(o.x) },
+          y: { beginAtZero: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR }, title: AXIS_TITLE(o.y) }
+        }
+      }
+    });
+    if (focus) {
+      var pinned = new Set(), pills = [];
+      var refresh = function () { pills.forEach(function (p) { p._refresh(false); }); };
+      var bar = makeControls(container);
+      parsed.datasets.forEach(function (dsi, i) { var p = buildPill(chart, pinned, refresh, dsi, i); pills.push(p); bar.appendChild(p); });
+      // pre-pin heroes
+      parsed.datasets.forEach(function (dsi, i) { if (heroes.indexOf((dsi.label || '').toLowerCase()) >= 0) pinned.add(i); });
+      if (pinned.size) { refresh(); applyFocus(chart, pinned, -1); }
+    }
+  }
+
+  function renderSPD(container, canvas, parsed, o) {
+    var ctx = canvas.getContext('2d');
+    var single = parsed.datasets.length === 1;
+    var hasAbsolute = !!o.distance; // distance present => this is a calibrated intensity reading => offer Absolute
+
+    if (single) {
+      // parity path: intensity column, wavelength = 380 + index, normalized
+      var spd = parsed.datasets[0].data.slice();
+      var mx = Math.max.apply(null, spd) || 1;
+      spd = spd.map(function (v) { return v / mx; });
+      var startNM = 380, endNM = startNM + spd.length - 1;
+      var xy = spd.map(function (v, i) { return { x: startNM + i, y: v }; });
+      var chart = new Chart(ctx, {
+        type: 'line',
+        data: { datasets: [{ label: 'SPD', data: xy, borderColor: 'transparent', borderWidth: 0, fill: true, pointRadius: 0, tension: 0.1, clip: false, backgroundColor: function (c) {
+          var area = c.chart.chartArea; if (!area) return 'rgba(0,0,0,0.1)';
+          var g = ctx.createLinearGradient(area.left, 0, area.right, 0);
+          var pos = function (nm) { return Math.max(0, Math.min(1, (nm - startNM) / (endNM - startNM))); };
+          g.addColorStop(0, 'rgba(75,0,130,1)'); g.addColorStop(pos(450), 'rgba(0,0,255,1)'); g.addColorStop(pos(490), 'rgba(0,255,255,1)'); g.addColorStop(pos(530), 'rgba(0,255,0,1)'); g.addColorStop(pos(580), 'rgba(255,255,0,1)'); g.addColorStop(pos(620), 'rgba(255,127,0,1)'); g.addColorStop(pos(700), 'rgba(255,0,0,1)'); g.addColorStop(1, 'rgba(100,0,0,1)');
+          return g;
+        } }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, parsing: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { display: false }, tooltip: { enabled: false, external: spdSingleTip } },
+          scales: {
+            x: { type: 'linear', min: startNM, max: endNM, grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), ticks: { color: TICK_COLOR, callback: function (v) { return v % 20 === 0 ? v : null; } } },
+            y: { min: 0, max: 1, display: false }
+          }
+        },
+        plugins: [melLayer]
+      });
+      chart.$melScale = 1;
+      spdMelToggle(container, chart);
+      if (o.distance) { var dn = document.createElement('div'); dn.textContent = 'Measured at ' + o.distance; dn.style.cssText = 'font-size:12px;color:#94a3b8;font-weight:700;margin-top:6px;font-family:Nunito,sans-serif;'; container.parentNode.insertBefore(dn, container.nextSibling); }
+      return;
+    }
+
+    // multi SPD: wavelength column as x, each series a line
+    var nm = parsed.xLabels.map(parseFloat);
+    var abs = false; // start in shape mode
+    var series = parsed.datasets.map(function (dsi, i) {
+      var color = OYB[i % OYB.length];
+      var raw = dsi.data.map(function (v, k) { return { x: nm[k], y: v }; });
+      return { name: dsi.label, color: color, raw: raw };
+    });
+    var chart = new Chart(ctx, {
+      type: 'line', data: { datasets: [] },
+      options: {
+        responsive: true, maintainAspectRatio: false, parsing: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', font: { weight: '800' } } },
+          tooltip: { enabled: false, external: makeMultiTip(function (x) { return Math.round(x) + ' nm'; }, function (p) { return abs ? p.parsed.y.toFixed(2) : (p.parsed.y * 100).toFixed(0) + '%'; }) } },
+        scales: {
+          x: { type: 'linear', min: Math.min.apply(null, nm), max: Math.max.apply(null, nm), grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x) },
+          y: { min: 0, beginAtZero: true, grid: { color: GRID_COLOR }, title: AXIS_TITLE('') }
+        }
+      },
+      plugins: [melLayer]
+    });
+    function draw() {
+      var yMax = 1;
+      if (abs) { yMax = 0; series.forEach(function (s) { s.raw.forEach(function (p) { if (p.y > yMax) yMax = p.y; }); }); }
+      chart.data.datasets = series.map(function (s) {
+        var data = abs ? s.raw : (function () { var m = 0; s.raw.forEach(function (p) { if (p.y > m) m = p.y; }); m = m || 1; return s.raw.map(function (p) { return { x: p.x, y: p.y / m }; }); })();
+        return { label: s.name, data: data, borderColor: s.color, backgroundColor: s.color, borderWidth: 2.5, pointRadius: 0, tension: 0.15, fill: false, clip: false };
+      });
+      chart.options.scales.y.max = abs ? yMax : 1;
+      chart.options.scales.y.title.text = abs ? upper('Relative irradiance (' + SPD_ABS_UNITS + ')') : 'NORMALIZED';
+      chart.$melScale = abs ? yMax : 1;
+      chart.update();
+    }
+    draw();
+    // controls
+    var barc = makeControls(container);
+    var bShape = toggleBtn('Shape', true), bAbs = toggleBtn('Absolute', false), bMel = toggleBtn('Melanopic curve', false);
+    barc.appendChild(bShape); if (hasAbsolute) barc.appendChild(bAbs); barc.appendChild(bMel);
+    bShape.onclick = function () { abs = false; paintToggle(bShape, true); paintToggle(bAbs, false); draw(); };
+    bAbs.onclick = function () { abs = true; paintToggle(bAbs, true); paintToggle(bShape, false); draw(); };
+    bMel.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(bMel, !!chart.$showMel); chart.update(); };
+    if (o.distance) { var note = document.createElement('span'); note.textContent = 'measured at ' + o.distance; note.style.cssText = 'font-size:12px;color:#94a3b8;font-weight:700;align-self:center;margin-left:4px;'; barc.appendChild(note); }
+  }
+
+  function spdMelToggle(container, chart) {
+    var barc = makeControls(container);
+    var b = toggleBtn('Melanopic curve', false);
+    b.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(b, !!chart.$showMel); chart.update(); };
+    barc.appendChild(b);
+  }
+
+  function renderFlicker(container, canvas, parsed, o) {
+    var times = parsed.xLabels.map(parseFloat);
+    var xmax = Math.max.apply(null, times) || 0.1;
+    var single = parsed.datasets.length === 1;
+
+    function pctOf(arr) { var mn = Infinity, mxv = -Infinity; arr.forEach(function (v) { if (v == null) return; if (v < mn) mn = v; if (v > mxv) mxv = v; }); if (!isFinite(mn) || (mxv + mn) === 0) return null; return (mxv - mn) / (mxv + mn) * 100; }
+    function xy(arr) { var out = []; for (var k = 0; k < arr.length; k++) { if (arr[k] != null && !isNaN(times[k])) out.push({ x: times[k], y: arr[k] }); } return out; }
+    function flickerScales() {
+      return {
+        x: { type: 'linear', min: 0, max: xmax, grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.flicker.x), ticks: { color: TICK_COLOR, callback: function (v) { return Number(v.toFixed(3)).toString() + 's'; } } },
+        y: { min: 0, max: 1, grid: { color: GRID_COLOR }, title: AXIS_TITLE(FIXED_AXIS.flicker.y), ticks: { color: TICK_COLOR, stepSize: 0.2, callback: function (v) { return Math.round(v * 100) + '%'; } } }
+      };
+    }
+
+    if (single) {
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { datasets: [{ data: xy(parsed.datasets[0].data), borderColor: PINK, backgroundColor: hexToRgba(PINK, 0.18), fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.1 }] },
+        options: { responsive: true, maintainAspectRatio: false, parsing: false, plugins: { legend: { display: false }, tooltip: { enabled: false } }, scales: flickerScales() }
+      });
+      // spec chips
+      var pct = o.flickerPercent !== '' && o.flickerPercent != null ? parseFloat(o.flickerPercent) : pctOf(parsed.datasets[0].data);
+      var freq = o.flickerFrequency !== '' && o.flickerFrequency != null ? parseFloat(o.flickerFrequency) : null;
+      var chips = document.createElement('div');
+      chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-family:Nunito,sans-serif;';
+      function chip(k, v, color) {
+        return '<div style="background:#fff;border:1px solid #f1e3e6;border-radius:12px;padding:8px 14px;min-width:90px;"><div style="font-size:11px;font-weight:800;letter-spacing:.4px;color:#94a3b8;text-transform:uppercase;">' + k + '</div><div style="font-size:18px;font-weight:900;color:' + (color || NAVY) + ';">' + v + '</div></div>';
+      }
+      var html = '';
+      if (pct != null && !isNaN(pct)) html += chip('% Flicker', (Math.round(pct * 10) / 10) + '%');
+      if (freq != null && !isNaN(freq)) html += chip('Frequency', freq + ' Hz');
+      var verdict = (pct != null && freq != null) ? ieeeVerdict(pct, freq) : null;
+      if (verdict) html += chip('IEEE 1789', verdict.t, verdict.c);
+      chips.innerHTML = html;
+      if (html) container.parentNode.insertBefore(chips, container.nextSibling);
+      return;
+    }
+
+    // multi -> small multiples grid
+    container.style.height = 'auto';
+    var existing = container.querySelector('canvas'); if (existing) existing.remove();
+    var grid = document.createElement('div');
+    grid.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:12px;';
+    if (isMobile()) grid.style.gridTemplateColumns = 'repeat(2,1fr)';
+    container.appendChild(grid);
+    parsed.datasets.forEach(function (dsi, i) {
+      var color = OYB[i % OYB.length];
+      var pct = pctOf(dsi.data);
+      var tile = document.createElement('div');
+      tile.style.cssText = 'background:#fffafa;border:1px solid #f1e3e6;border-radius:12px;padding:9px 9px 5px;min-width:0;';
+      tile.innerHTML = '<div style="font-size:11.5px;font-weight:800;color:#334155;display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px;"><span>' + dsi.label + '</span><span style="color:#94a3b8;">' + (pct != null ? Math.round(pct) + '%' : '') + '</span></div><div style="position:relative;height:90px;"><canvas></canvas></div>';
+      grid.appendChild(tile);
+      new Chart(tile.querySelector('canvas').getContext('2d'), {
+        type: 'line',
+        data: { datasets: [{ data: xy(dsi.data), borderColor: color, backgroundColor: hexToRgba(color, 0.18), fill: true, borderWidth: 1, pointRadius: 0, tension: 0.1 }] },
+        options: { responsive: true, maintainAspectRatio: false, parsing: false, plugins: { legend: { display: false }, tooltip: { enabled: false } },
+          scales: { x: { type: 'linear', min: 0, max: xmax, ticks: { display: false }, grid: { display: false } }, y: { min: 0, max: 1, ticks: { stepSize: 0.5, font: { size: 9 }, callback: function (v) { return Math.round(v * 100) + '%'; } }, grid: { color: GRID_COLOR } } } }
+      });
+    });
+  }
+
+  function renderFlickerRisk(container, canvas, parsed, o) {
+    // rows: Label, Frequency, Modulation  (via chart_data)
+    var heroes = heroList(o.highlight);
+    var pts = [];
+    for (var i = 0; i < parsed.xLabels.length; i++) {
+      var label = parsed.xLabels[i];
+      var f = parsed.datasets[0] ? parsed.datasets[0].data[i] : null;
+      var m = parsed.datasets[1] ? parsed.datasets[1].data[i] : null;
+      if (f == null || m == null) continue;
+      pts.push({ label: label, f: f, m: m });
+    }
+    var lampDs = pts.map(function (p) {
+      return { label: p.label, type: 'scatter', data: [{ x: p.f, y: p.m }], backgroundColor: heroColorOf(p.label, heroes, GREY), borderColor: '#fff', borderWidth: 2, pointRadius: 7, pointHoverRadius: 9 };
+    });
+    var topLine = ieeeCurve(function () { return 100; });
+    new Chart(canvas.getContext('2d'), {
+      type: 'scatter',
+      data: { datasets: [
+        { label: 'no', _limit: true, type: 'line', data: ieeeCurve(ieeeNo), borderColor: GREEN, borderWidth: 2.5, pointRadius: 0, tension: 0, fill: 'start', backgroundColor: 'rgba(16,185,129,0.13)' },
+        { label: 'low', _limit: true, type: 'line', data: ieeeCurve(ieeeLow), borderColor: AMBER, borderWidth: 2.5, pointRadius: 0, tension: 0, fill: '-1', backgroundColor: 'rgba(245,158,11,0.14)' },
+        { label: 'top', _limit: true, type: 'line', data: topLine, borderColor: 'transparent', borderWidth: 0, pointRadius: 0, fill: '-1', backgroundColor: 'rgba(220,38,38,0.10)' }
+      ].concat(lampDs) },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, position: 'top', labels: { usePointStyle: true, font: { weight: '800' }, filter: function (item, data) { return !data.datasets[item.datasetIndex]._limit; } } },
+          tooltip: { enabled: true, backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#e2e8f0', padding: 12, cornerRadius: 12, usePointStyle: true, titleFont: { family: 'Nunito', weight: '800', size: 14 }, bodyFont: { family: 'Nunito', weight: '700', size: 13 }, filter: function (i) { return !i.chart.data.datasets[i.datasetIndex]._limit; }, callbacks: { title: function (items) { return items[0].dataset.label; }, label: function (i) { return i.parsed.y + '% depth @ ' + i.parsed.x + ' Hz'; } } }
+        },
+        scales: {
+          x: { type: 'logarithmic', min: 1, max: 10000, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Flicker frequency (Hz)') },
+          y: { type: 'logarithmic', min: 0.1, max: 100, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Modulation depth (%)'), ticks: { color: TICK_COLOR, callback: function (v) { var l = Math.log10(v); return Math.abs(l - Math.round(l)) < 1e-9 ? (v < 1 ? '0.1' : String(v)) : null; } } }
+        }
+      },
+      plugins: [ieeeLabelsPlugin]
+    });
+  }
+
+  // ================= DISPATCH =================
+  containers.forEach(function (container) {
+    var canvas = container.querySelector('canvas');
+    if (!canvas) return;
+    var type = (container.getAttribute('data-type') || '').toLowerCase();
+    var raw = decodeBase64(container.getAttribute('data-csv') || '');
+    if (!raw.trim()) return;
+    var fixed = FIXED_AXIS[type];
+    var o = {
+      x: fixed ? fixed.x : container.getAttribute('data-x'),
+      y: fixed ? fixed.y : container.getAttribute('data-y'),
+      highlight: container.getAttribute('data-highlight'),
+      units: container.getAttribute('data-units'),
+      distance: container.getAttribute('data-distance'),
+      flickerPercent: container.getAttribute('data-flicker-percent'),
+      flickerFrequency: container.getAttribute('data-flicker-frequency')
+    };
+    var parsed = parseCSV(raw);
+    try {
+      if (type === 'bar') renderBar(container, canvas, parsed, o);
+      else if (type === 'line') renderLine(container, canvas, parsed, o);
+      else if (type === 'spd') renderSPD(container, canvas, parsed, o);
+      else if (type === 'flicker') renderFlicker(container, canvas, parsed, o);
+      else if (type === 'flicker_risk' || type === 'flicker-risk') renderFlickerRisk(container, canvas, parsed, o);
+    } catch (e) {
+      if (window.console) console.error('OYB chart render error (' + type + '):', e);
+    }
+  });
 });
