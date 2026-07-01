@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.6
+ * OYB Chart Engine — v1.1.7
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -108,8 +108,9 @@ document.addEventListener('DOMContentLoaded', function () {
     return bar;
   }
   function paintToggle(b, on) {
-    b.style.background = on ? PINK : '#fff';
-    b.style.borderColor = on ? PINK : '#e2b9c7';
+    // slate (not pink) so view-mode toggles never look like a colored data-series pill
+    b.style.background = on ? '#334155' : '#fff';
+    b.style.borderColor = on ? '#334155' : '#e2b9c7';
     b.style.color = on ? '#fff' : '#64748b';
   }
   function toggleBtn(label, on) {
@@ -427,6 +428,7 @@ document.addEventListener('DOMContentLoaded', function () {
       p.onclick = function () { s.visible = !s.visible; draw(); stylePill(p, s.color, s.visible); };
       barc.appendChild(p);
     });
+    var _sep = document.createElement('span'); _sep.style.cssText = 'width:1px;align-self:stretch;min-height:22px;background:#e2d0d6;margin:0 6px;'; barc.appendChild(_sep);
     var bShape = toggleBtn('Shape', true), bAbs = toggleBtn('Absolute', false), bMel = toggleBtn('Melanopic curve', false);
     barc.appendChild(bShape); if (hasAbsolute) barc.appendChild(bAbs); barc.appendChild(bMel);
     bShape.onclick = function () { abs = false; paintToggle(bShape, true); paintToggle(bAbs, false); draw(); };
@@ -514,8 +516,14 @@ document.addEventListener('DOMContentLoaded', function () {
       if (f == null || m == null) continue;
       pts.push({ label: label, f: f, m: m });
     }
+    // distinct color per lamp so every point is identifiable: heroes pink/blue, the rest cycle the palette
+    var rest = OYB.slice(2), ri = 0;
+    pts.forEach(function (p) {
+      var h = heroes.indexOf((p.label || '').trim().toLowerCase());
+      p.color = h === 0 ? PINK : h === 1 ? BLUE : rest[(ri++) % rest.length];
+    });
     var lampDs = pts.map(function (p) {
-      return { label: p.label, type: 'scatter', data: [{ x: p.f, y: p.m }], backgroundColor: heroColorOf(p.label, heroes, GREY), borderColor: '#fff', borderWidth: 2, pointRadius: 7, pointHoverRadius: 9 };
+      return { label: p.label, type: 'scatter', data: [{ x: p.f, y: p.m }], backgroundColor: p.color, borderColor: '#fff', borderWidth: 2, pointRadius: 7, pointHoverRadius: 9 };
     });
     var topLine = ieeeCurve(function () { return 100; });
     var chart = new Chart(canvas.getContext('2d'), {
