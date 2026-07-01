@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.5
+ * OYB Chart Engine — v1.1.6
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -103,7 +103,7 @@ document.addEventListener('DOMContentLoaded', function () {
   function makeControls(container) {
     var bar = document.createElement('div');
     bar.className = 'oyb-chart-controls';
-    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;font-family:Nunito,sans-serif;';
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:18px;font-family:Nunito,sans-serif;';
     container.parentNode.insertBefore(bar, container);
     return bar;
   }
@@ -118,6 +118,11 @@ document.addEventListener('DOMContentLoaded', function () {
     b.style.cssText = 'font-family:inherit;font-weight:800;font-size:12px;border:2px solid #e2b9c7;border-radius:999px;padding:5px 12px;cursor:pointer;';
     paintToggle(b, !!on);
     return b;
+  }
+  // Shared series-pill look (used by line, SPD, flicker-risk so legends are consistent)
+  function stylePill(btn, color, active) {
+    var faded = hexToRgba(color, 0.4);
+    btn.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-family:Nunito,sans-serif;font-weight:700;font-size:13px;cursor:pointer;transition:all .15s ease;border:2px solid ' + (active ? color : faded) + ';background:' + (active ? color : 'transparent') + ';color:' + (active ? '#fff' : faded) + ';';
   }
 
   var AXIS_TITLE = function (text) {
@@ -384,14 +389,14 @@ document.addEventListener('DOMContentLoaded', function () {
     var series = parsed.datasets.map(function (dsi, i) {
       var color = OYB[i % OYB.length];
       var raw = dsi.data.map(function (v, k) { return { x: nm[k], y: v }; });
-      return { name: dsi.label, color: color, raw: raw };
+      return { name: dsi.label, color: color, raw: raw, visible: true };
     });
     var chart = new Chart(ctx, {
       type: 'line', data: { datasets: [] },
       options: {
         responsive: true, maintainAspectRatio: false, parsing: false,
         interaction: { mode: 'index', intersect: false },
-        plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', font: { weight: '800' } } },
+        plugins: { legend: { display: false },
           tooltip: { enabled: false, external: makeMultiTip(function (x) { return Math.round(x) + ' nm'; }, function (p) { return abs ? p.parsed.y.toFixed(2) : (p.parsed.y * 100).toFixed(0) + '%'; }) } },
         scales: {
           x: { type: 'linear', min: Math.min.apply(null, nm), max: Math.max.apply(null, nm), grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicks, ticks: { color: TICK_COLOR } },
@@ -405,7 +410,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (abs) { yMax = 0; series.forEach(function (s) { s.raw.forEach(function (p) { if (p.y > yMax) yMax = p.y; }); }); }
       chart.data.datasets = series.map(function (s) {
         var data = abs ? s.raw : (function () { var m = 0; s.raw.forEach(function (p) { if (p.y > m) m = p.y; }); m = m || 1; return s.raw.map(function (p) { return { x: p.x, y: p.y / m }; }); })();
-        return { label: s.name, data: data, borderColor: s.color, backgroundColor: s.color, borderWidth: 2.5, pointRadius: 0, tension: 0.15, fill: false, clip: false };
+        return { label: s.name, data: data, borderColor: s.color, backgroundColor: s.color, borderWidth: 2.5, pointRadius: 0, tension: 0.15, fill: false, clip: false, hidden: !s.visible };
       });
       chart.options.scales.y.max = abs ? yMax : 1;
       chart.options.scales.y.title.display = true;
@@ -416,6 +421,12 @@ document.addEventListener('DOMContentLoaded', function () {
     draw();
     // controls
     var barc = makeControls(container);
+    series.forEach(function (s) {
+      var p = document.createElement('button'); p.type = 'button'; p.textContent = s.name;
+      stylePill(p, s.color, true);
+      p.onclick = function () { s.visible = !s.visible; draw(); stylePill(p, s.color, s.visible); };
+      barc.appendChild(p);
+    });
     var bShape = toggleBtn('Shape', true), bAbs = toggleBtn('Absolute', false), bMel = toggleBtn('Melanopic curve', false);
     barc.appendChild(bShape); if (hasAbsolute) barc.appendChild(bAbs); barc.appendChild(bMel);
     bShape.onclick = function () { abs = false; paintToggle(bShape, true); paintToggle(bAbs, false); draw(); };
@@ -507,7 +518,7 @@ document.addEventListener('DOMContentLoaded', function () {
       return { label: p.label, type: 'scatter', data: [{ x: p.f, y: p.m }], backgroundColor: heroColorOf(p.label, heroes, GREY), borderColor: '#fff', borderWidth: 2, pointRadius: 7, pointHoverRadius: 9 };
     });
     var topLine = ieeeCurve(function () { return 100; });
-    new Chart(canvas.getContext('2d'), {
+    var chart = new Chart(canvas.getContext('2d'), {
       type: 'scatter',
       data: { datasets: [
         { label: 'no', _limit: true, type: 'line', data: ieeeCurve(ieeeNo), borderColor: GREEN, borderWidth: 2.5, pointRadius: 0, tension: 0, fill: 'start', backgroundColor: 'rgba(16,185,129,0.13)' },
@@ -517,15 +528,29 @@ document.addEventListener('DOMContentLoaded', function () {
       options: {
         responsive: true, maintainAspectRatio: false,
         plugins: {
-          legend: { display: true, position: 'top', labels: { usePointStyle: true, font: { weight: '800' }, filter: function (item, data) { return !data.datasets[item.datasetIndex]._limit; } } },
+          legend: { display: false },
           tooltip: { enabled: true, backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#e2e8f0', padding: 12, cornerRadius: 12, displayColors: false, titleFont: { family: 'Nunito', weight: '800', size: 14 }, bodyFont: { family: 'Nunito', weight: '700', size: 13 }, filter: function (i) { return !i.chart.data.datasets[i.datasetIndex]._limit; }, callbacks: { title: function (items) { return items[0].dataset.label; }, label: function (i) { return i.parsed.y + '% depth @ ' + i.parsed.x + ' Hz'; } } }
         },
         scales: {
           x: { type: 'logarithmic', min: 1, max: 10000, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Flicker frequency (Hz)') },
           y: { type: 'logarithmic', min: 0.1, max: 100, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Modulation depth (%)'), ticks: { color: TICK_COLOR, callback: function (v) { var l = Math.log10(v); return Math.abs(l - Math.round(l)) < 1e-9 ? (v < 1 ? '0.1' : String(v)) : null; } } }
         }
-      },
-      plugins: [ieeeLabelsPlugin]
+      }
+    });
+
+    var barc = makeControls(container);
+    [['No risk', GREEN], ['Low risk', AMBER], ['High risk', RED]].forEach(function (z) {
+      var s = document.createElement('span');
+      s.style.cssText = 'display:inline-flex;align-items:center;gap:5px;font-family:Nunito,sans-serif;font-weight:800;font-size:12px;color:#64748b;margin-right:6px;';
+      s.innerHTML = '<span style="width:10px;height:10px;border-radius:50%;background:' + z[1] + ';display:inline-block;"></span>' + z[0];
+      barc.appendChild(s);
+    });
+    pts.forEach(function (p, i) {
+      var idx = 3 + i;
+      var btn = document.createElement('button'); btn.type = 'button'; btn.textContent = p.label;
+      stylePill(btn, p.color, true);
+      btn.onclick = function () { var vis = !chart.isDatasetVisible(idx); chart.setDatasetVisibility(idx, vis); chart.update(); stylePill(btn, p.color, vis); };
+      barc.appendChild(btn);
     });
   }
 
