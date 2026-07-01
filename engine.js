@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.7
+ * OYB Chart Engine — v1.1.8
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -537,7 +537,7 @@ document.addEventListener('DOMContentLoaded', function () {
         responsive: true, maintainAspectRatio: false,
         plugins: {
           legend: { display: false },
-          tooltip: { enabled: true, backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#e2e8f0', padding: 12, cornerRadius: 12, displayColors: false, titleFont: { family: 'Nunito', weight: '800', size: 14 }, bodyFont: { family: 'Nunito', weight: '700', size: 13 }, filter: function (i) { return !i.chart.data.datasets[i.datasetIndex]._limit; }, callbacks: { title: function (items) { return items[0].dataset.label; }, label: function (i) { return i.parsed.y + '% depth @ ' + i.parsed.x + ' Hz'; } } }
+          tooltip: { enabled: true, backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#e2e8f0', padding: 12, cornerRadius: 12, displayColors: false, titleFont: { family: 'Nunito', weight: '800', size: 14 }, bodyFont: { family: 'Nunito', weight: '700', size: 13 }, filter: function (i) { return !i.chart.data.datasets[i.datasetIndex]._limit; }, callbacks: { title: function () { return ''; }, label: function (i) { return i.dataset.label + ': ' + i.parsed.y + '% depth @ ' + i.parsed.x + ' Hz'; } } }
         },
         scales: {
           x: { type: 'logarithmic', min: 1, max: 10000, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Flicker frequency (Hz)') },
@@ -547,12 +547,6 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     var barc = makeControls(container);
-    [['No risk', GREEN], ['Low risk', AMBER], ['High risk', RED]].forEach(function (z) {
-      var s = document.createElement('span');
-      s.style.cssText = 'display:inline-flex;align-items:center;gap:5px;font-family:Nunito,sans-serif;font-weight:800;font-size:12px;color:#64748b;margin-right:6px;';
-      s.innerHTML = '<span style="width:10px;height:10px;border-radius:50%;background:' + z[1] + ';display:inline-block;"></span>' + z[0];
-      barc.appendChild(s);
-    });
     pts.forEach(function (p, i) {
       var idx = 3 + i;
       var btn = document.createElement('button'); btn.type = 'button'; btn.textContent = p.label;
@@ -560,6 +554,16 @@ document.addEventListener('DOMContentLoaded', function () {
       btn.onclick = function () { var vis = !chart.isDatasetVisible(idx); chart.setDatasetVisibility(idx, vis); chart.update(); stylePill(btn, p.color, vis); };
       barc.appendChild(btn);
     });
+    // risk-zone key on its own centered row below the chart
+    var key = document.createElement('div');
+    key.style.cssText = 'display:flex;flex-wrap:wrap;gap:16px;justify-content:center;margin-top:10px;font-family:Nunito,sans-serif;';
+    [['No risk', GREEN], ['Low risk', AMBER], ['High risk', RED]].forEach(function (z) {
+      var s = document.createElement('span');
+      s.style.cssText = 'display:inline-flex;align-items:center;gap:6px;font-weight:800;font-size:12px;color:#64748b;';
+      s.innerHTML = '<span style="width:11px;height:11px;border-radius:50%;background:' + z[1] + ';display:inline-block;"></span>' + z[0];
+      key.appendChild(s);
+    });
+    container.parentNode.insertBefore(key, container.nextSibling);
   }
 
   // ================= DISPATCH =================
