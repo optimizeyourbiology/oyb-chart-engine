@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.8
+ * OYB Chart Engine — v1.1.9
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -526,6 +526,28 @@ document.addEventListener('DOMContentLoaded', function () {
       return { label: p.label, type: 'scatter', data: [{ x: p.f, y: p.m }], backgroundColor: p.color, borderColor: '#fff', borderWidth: 2, pointRadius: 7, pointHoverRadius: 9 };
     });
     var topLine = ieeeCurve(function () { return 100; });
+
+    function riskTipEl() {
+      var el = document.getElementById('oyb-risk-tip'); if (el) return el;
+      el = document.createElement('div'); el.id = 'oyb-risk-tip';
+      el.style.cssText = 'opacity:0;position:absolute;background:#1e293b;border-radius:12px;padding:11px 14px;pointer-events:none;transform:translate(-50%,calc(-100% - 12px));transition:opacity .1s ease,top .1s ease,left .1s ease;box-shadow:0 10px 25px rgba(0,0,0,0.3);z-index:1000;min-width:160px;font-family:Nunito,sans-serif;';
+      document.body.appendChild(el); return el;
+    }
+    function riskExternal(ctx2) {
+      var el = riskTipEl(), tt = ctx2.tooltip;
+      if (tt.opacity === 0) { el.style.opacity = 0; return; }
+      var dps = (tt.dataPoints || []).filter(function (p) { return !p.chart.data.datasets[p.datasetIndex]._limit; });
+      if (!dps.length) return;
+      el.innerHTML = dps.map(function (p) {
+        var c = p.dataset.backgroundColor;
+        return '<div class="oyb-rt-row" style="margin-top:8px;"><div style="display:flex;align-items:center;gap:8px;font-weight:800;font-size:14px;color:#fff;line-height:1;"><span style="width:11px;height:11px;border-radius:50%;background:' + c + ';flex:none;"></span>' + p.dataset.label + '</div><div style="font-size:12px;font-weight:700;color:#9fb0c4;margin-left:19px;margin-top:3px;">' + p.parsed.y + '% depth &middot; ' + p.parsed.x + ' Hz</div></div>';
+      }).join('');
+      if (el.firstChild) el.firstChild.style.marginTop = '0';
+      var pos = ctx2.chart.canvas.getBoundingClientRect();
+      el.style.opacity = 1; el.style.left = pos.left + window.scrollX + tt.caretX + 'px'; el.style.top = pos.top + window.scrollY + tt.caretY + 'px';
+    }
+    var alignKey = { id: 'alignKey', afterDraw: function (c) { var k = c.$key; if (!k) return; var a = c.chartArea; k.style.paddingLeft = a.left + 'px'; k.style.paddingRight = (c.width - a.right) + 'px'; } };
+
     var chart = new Chart(canvas.getContext('2d'), {
       type: 'scatter',
       data: { datasets: [
@@ -537,13 +559,14 @@ document.addEventListener('DOMContentLoaded', function () {
         responsive: true, maintainAspectRatio: false,
         plugins: {
           legend: { display: false },
-          tooltip: { enabled: true, backgroundColor: '#1e293b', titleColor: '#fff', bodyColor: '#e2e8f0', padding: 12, cornerRadius: 12, displayColors: false, titleFont: { family: 'Nunito', weight: '800', size: 14 }, bodyFont: { family: 'Nunito', weight: '700', size: 13 }, filter: function (i) { return !i.chart.data.datasets[i.datasetIndex]._limit; }, callbacks: { title: function () { return ''; }, label: function (i) { return i.dataset.label + ': ' + i.parsed.y + '% depth @ ' + i.parsed.x + ' Hz'; } } }
+          tooltip: { enabled: false, external: riskExternal }
         },
         scales: {
           x: { type: 'logarithmic', min: 1, max: 10000, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Flicker frequency (Hz)') },
           y: { type: 'logarithmic', min: 0.1, max: 100, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Modulation depth (%)'), ticks: { color: TICK_COLOR, callback: function (v) { var l = Math.log10(v); return Math.abs(l - Math.round(l)) < 1e-9 ? (v < 1 ? '0.1' : String(v)) : null; } } }
         }
-      }
+      },
+      plugins: [alignKey]
     });
 
     var barc = makeControls(container);
@@ -554,16 +577,18 @@ document.addEventListener('DOMContentLoaded', function () {
       btn.onclick = function () { var vis = !chart.isDatasetVisible(idx); chart.setDatasetVisibility(idx, vis); chart.update(); stylePill(btn, p.color, vis); };
       barc.appendChild(btn);
     });
-    // risk-zone key on its own centered row below the chart
+    // risk-zone key — own row, aligned under the plot area by the alignKey plugin, pulled up close
     var key = document.createElement('div');
-    key.style.cssText = 'display:flex;flex-wrap:wrap;gap:16px;justify-content:center;margin-top:10px;font-family:Nunito,sans-serif;';
+    key.style.cssText = 'display:flex;flex-wrap:wrap;gap:18px;justify-content:center;box-sizing:border-box;margin-top:2px;font-family:Nunito,sans-serif;';
     [['No risk', GREEN], ['Low risk', AMBER], ['High risk', RED]].forEach(function (z) {
       var s = document.createElement('span');
-      s.style.cssText = 'display:inline-flex;align-items:center;gap:6px;font-weight:800;font-size:12px;color:#64748b;';
-      s.innerHTML = '<span style="width:11px;height:11px;border-radius:50%;background:' + z[1] + ';display:inline-block;"></span>' + z[0];
+      s.style.cssText = 'display:inline-flex;align-items:center;gap:6px;line-height:1;font-weight:800;font-size:12px;color:#64748b;';
+      s.innerHTML = '<span style="width:11px;height:11px;border-radius:50%;background:' + z[1] + ';flex:none;"></span>' + z[0];
       key.appendChild(s);
     });
     container.parentNode.insertBefore(key, container.nextSibling);
+    chart.$key = key;
+    chart.update();
   }
 
   // ================= DISPATCH =================
