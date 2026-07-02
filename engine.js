@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.9
+ * OYB Chart Engine — v1.1.11
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -177,14 +177,28 @@ document.addEventListener('DOMContentLoaded', function () {
     el.style.cssText = 'opacity:0;position:absolute;background:#1e293b;color:#fff;border-radius:12px;padding:12px 14px;pointer-events:none;transform:translate(-50%,calc(-100% - 15px));transition:opacity .1s ease,top .1s ease,left .1s ease;box-shadow:0 10px 25px rgba(0,0,0,0.3);z-index:1000;min-width:170px;font-family:Nunito,sans-serif;';
     document.body.appendChild(el); return el;
   }
+  function segmented(labels, active, onPick) {
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:inline-flex;border:2px solid #cbd5e1;border-radius:999px;overflow:hidden;font-family:Nunito,sans-serif;';
+    var btns = [];
+    labels.forEach(function (lab, i) {
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = lab;
+      b.style.cssText = 'font-family:inherit;font-weight:800;font-size:12px;border:none;padding:5px 14px;cursor:pointer;background:' + (i === active ? '#334155' : '#fff') + ';color:' + (i === active ? '#fff' : '#64748b') + ';';
+      b.onclick = function () { active = i; btns.forEach(function (bb, j) { bb.style.background = j === i ? '#334155' : '#fff'; bb.style.color = j === i ? '#fff' : '#64748b'; }); onPick(i); };
+      wrap.appendChild(b); btns.push(b);
+    });
+    return wrap;
+  }
   function spdSingleTip(ctx) {
     var el = spdTipEl(), tt = ctx.tooltip; if (tt.opacity === 0) { el.style.opacity = 0; return; }
     var dp = (tt.dataPoints || [])[0]; if (!dp) return;
-    var wl = Math.round(dp.parsed.x), inten = Math.max(0, Math.min(100, dp.parsed.y * 100)), c = nmToRGB(wl);
+    var ch = ctx.chart, wl = Math.round(dp.parsed.x), yv = dp.parsed.y, c = nmToRGB(wl), bar, val;
+    if (ch.$absolute) { var mx = ch.$yMax || 1; bar = Math.max(0, Math.min(100, yv / mx * 100)); val = Number(yv.toPrecision(3)) + ' ' + SPD_ABS_UNITS; }
+    else { bar = Math.max(0, Math.min(100, yv * 100)); val = bar.toFixed(1) + '%'; }
     el.querySelector('.t').innerText = wl + ' nm';
-    el.querySelector('.v').innerText = inten.toFixed(1) + '%';
+    el.querySelector('.v').innerText = val;
     el.querySelector('.d').style.backgroundColor = c;
-    el.querySelector('.b').style.width = inten + '%';
+    el.querySelector('.b').style.width = bar + '%';
     el.querySelector('.b').style.backgroundColor = c;
     var pos = ctx.chart.canvas.getBoundingClientRect();
     el.style.opacity = 1; el.style.left = pos.left + window.scrollX + tt.caretX + 'px'; el.style.top = pos.top + window.scrollY + tt.caretY + 'px';
@@ -352,12 +366,12 @@ document.addEventListener('DOMContentLoaded', function () {
     var hasAbsolute = !!o.distance; // distance present => this is a calibrated intensity reading => offer Absolute
 
     if (single) {
-      // parity path: intensity column, wavelength = 380 + index, normalized
-      var spd = parsed.datasets[0].data.slice();
-      var mx = Math.max.apply(null, spd) || 1;
-      spd = spd.map(function (v) { return v / mx; });
-      var startNM = 380, endNM = startNM + spd.length - 1;
-      var xy = spd.map(function (v, i) { return { x: startNM + i, y: v }; });
+      // single SPD: normalized shape by default; if a distance is set, show real irradiance on a y-axis
+      var raw = parsed.datasets[0].data.slice();
+      var startNM = 380, endNM = startNM + raw.length - 1;
+      var rawMax = Math.max.apply(null, raw) || 1;
+      var absSingle = hasAbsolute;
+      var xy = raw.map(function (v, i) { return { x: startNM + i, y: absSingle ? v : v / rawMax }; });
       var chart = new Chart(ctx, {
         type: 'line',
         data: { datasets: [{ label: 'SPD', data: xy, borderColor: 'transparent', borderWidth: 0, fill: true, pointRadius: 0, tension: 0.1, clip: false, backgroundColor: function (c) {
@@ -373,14 +387,17 @@ document.addEventListener('DOMContentLoaded', function () {
           plugins: { legend: { display: false }, tooltip: { enabled: false, external: spdSingleTip } },
           scales: {
             x: { type: 'linear', min: startNM, max: endNM, grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicks, ticks: { color: TICK_COLOR } },
-            y: { min: 0, max: 1, display: false }
+            y: absSingle
+              ? { min: 0, beginAtZero: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR }, title: { display: true, text: SPD_ABS_UNITS, font: AXIS_TITLE_FONT, color: AXIS_COLOR, padding: TITLE_PAD } }
+              : { min: 0, max: 1, display: false }
           }
         },
         plugins: [melLayer]
       });
-      chart.$melScale = 1;
-      spdMelToggle(container, chart);
-      if (o.distance) { var dn = document.createElement('div'); dn.textContent = 'Measured at ' + o.distance; dn.style.cssText = 'font-size:12px;color:#94a3b8;font-weight:700;margin-top:6px;font-family:Nunito,sans-serif;'; container.parentNode.insertBefore(dn, container.nextSibling); }
+      chart.$absolute = absSingle;
+      chart.$yMax = absSingle ? rawMax : 1;
+      chart.$melScale = absSingle ? rawMax : 1;
+      spdMelToggle(container, chart, o.distance);
       return;
     }
 
@@ -429,19 +446,19 @@ document.addEventListener('DOMContentLoaded', function () {
       barc.appendChild(p);
     });
     var _sep = document.createElement('span'); _sep.style.cssText = 'width:1px;align-self:stretch;min-height:22px;background:#e2d0d6;margin:0 6px;'; barc.appendChild(_sep);
-    var bShape = toggleBtn('Shape', true), bAbs = toggleBtn('Absolute', false), bMel = toggleBtn('Melanopic curve', false);
-    barc.appendChild(bShape); if (hasAbsolute) barc.appendChild(bAbs); barc.appendChild(bMel);
-    bShape.onclick = function () { abs = false; paintToggle(bShape, true); paintToggle(bAbs, false); draw(); };
-    bAbs.onclick = function () { abs = true; paintToggle(bAbs, true); paintToggle(bShape, false); draw(); };
+    if (hasAbsolute) { barc.appendChild(segmented(['Normalized', 'Absolute'], 0, function (i) { abs = (i === 1); draw(); })); }
+    var bMel = toggleBtn('Melanopic', false);
     bMel.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(bMel, !!chart.$showMel); chart.update(); };
+    barc.appendChild(bMel);
     if (o.distance) { var note = document.createElement('span'); note.textContent = 'measured at ' + o.distance; note.style.cssText = 'font-size:12px;color:#94a3b8;font-weight:700;align-self:center;margin-left:4px;'; barc.appendChild(note); }
   }
 
-  function spdMelToggle(container, chart) {
+  function spdMelToggle(container, chart, distance) {
     var barc = makeControls(container);
-    var b = toggleBtn('Melanopic curve', false);
+    var b = toggleBtn('Melanopic', false);
     b.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(b, !!chart.$showMel); chart.update(); };
     barc.appendChild(b);
+    if (distance) { var note = document.createElement('span'); note.textContent = 'Measured at ' + distance; note.style.cssText = 'font-size:12px;color:#94a3b8;font-weight:700;align-self:center;margin-left:4px;'; barc.appendChild(note); }
   }
 
   function renderFlicker(container, canvas, parsed, o) {
@@ -486,15 +503,15 @@ document.addEventListener('DOMContentLoaded', function () {
     container.style.height = 'auto';
     var existing = container.querySelector('canvas'); if (existing) existing.remove();
     var grid = document.createElement('div');
-    grid.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:12px;';
-    if (isMobile()) grid.style.gridTemplateColumns = 'repeat(2,1fr)';
+    grid.style.cssText = 'display:grid;grid-template-columns:repeat(2,1fr);gap:14px;';
+    if (isMobile()) grid.style.gridTemplateColumns = '1fr';
     container.appendChild(grid);
     parsed.datasets.forEach(function (dsi, i) {
       var color = OYB[i % OYB.length];
       var pct = pctOf(dsi.data);
       var tile = document.createElement('div');
       tile.style.cssText = 'background:#fffafa;border:1px solid #f1e3e6;border-radius:12px;padding:9px 9px 5px;min-width:0;';
-      tile.innerHTML = '<div style="font-size:11.5px;font-weight:800;color:#334155;display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px;"><span>' + dsi.label + '</span><span style="color:#94a3b8;">' + (pct != null ? Math.round(pct) + '%' : '') + '</span></div><div style="position:relative;height:90px;"><canvas></canvas></div>';
+      tile.innerHTML = '<div style="font-size:11.5px;font-weight:800;color:#334155;display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px;"><span>' + dsi.label + '</span><span style="color:#94a3b8;">' + (pct != null ? Math.round(pct) + '%' : '') + '</span></div><div style="position:relative;height:120px;"><canvas></canvas></div>';
       grid.appendChild(tile);
       new Chart(tile.querySelector('canvas').getContext('2d'), {
         type: 'line',
@@ -546,7 +563,20 @@ document.addEventListener('DOMContentLoaded', function () {
       var pos = ctx2.chart.canvas.getBoundingClientRect();
       el.style.opacity = 1; el.style.left = pos.left + window.scrollX + tt.caretX + 'px'; el.style.top = pos.top + window.scrollY + tt.caretY + 'px';
     }
-    var alignKey = { id: 'alignKey', afterDraw: function (c) { var k = c.$key; if (!k) return; var a = c.chartArea; k.style.paddingLeft = a.left + 'px'; k.style.paddingRight = (c.width - a.right) + 'px'; } };
+    var zoneKey = { id: 'zoneKey', afterDraw: function (c) {
+      var ctx2 = c.ctx, a = c.chartArea, items = [['No risk', GREEN], ['Low risk', AMBER], ['High risk', RED]];
+      ctx2.save(); ctx2.font = "800 12px Nunito"; ctx2.textBaseline = 'middle';
+      var dot = 11, dotGap = 6, gap = 20;
+      var widths = items.map(function (it) { return dot + dotGap + ctx2.measureText(it[0]).width; });
+      var total = widths.reduce(function (s, w) { return s + w; }, 0) + gap * (items.length - 1);
+      var x = (a.left + a.right) / 2 - total / 2, y = c.height - 13;
+      items.forEach(function (it, i) {
+        ctx2.fillStyle = it[1]; ctx2.beginPath(); ctx2.arc(x + dot / 2, y, dot / 2, 0, 2 * Math.PI); ctx2.fill();
+        ctx2.fillStyle = '#64748b'; ctx2.textAlign = 'left'; ctx2.fillText(it[0], x + dot + dotGap, y);
+        x += widths[i] + gap;
+      });
+      ctx2.restore();
+    } };
 
     var chart = new Chart(canvas.getContext('2d'), {
       type: 'scatter',
@@ -557,6 +587,7 @@ document.addEventListener('DOMContentLoaded', function () {
       ].concat(lampDs) },
       options: {
         responsive: true, maintainAspectRatio: false,
+        layout: { padding: { bottom: 34 } },
         plugins: {
           legend: { display: false },
           tooltip: { enabled: false, external: riskExternal }
@@ -566,7 +597,7 @@ document.addEventListener('DOMContentLoaded', function () {
           y: { type: 'logarithmic', min: 0.1, max: 100, grid: { color: GRID_COLOR }, title: AXIS_TITLE('Modulation depth (%)'), ticks: { color: TICK_COLOR, callback: function (v) { var l = Math.log10(v); return Math.abs(l - Math.round(l)) < 1e-9 ? (v < 1 ? '0.1' : String(v)) : null; } } }
         }
       },
-      plugins: [alignKey]
+      plugins: [zoneKey]
     });
 
     var barc = makeControls(container);
@@ -577,18 +608,7 @@ document.addEventListener('DOMContentLoaded', function () {
       btn.onclick = function () { var vis = !chart.isDatasetVisible(idx); chart.setDatasetVisibility(idx, vis); chart.update(); stylePill(btn, p.color, vis); };
       barc.appendChild(btn);
     });
-    // risk-zone key — own row, aligned under the plot area by the alignKey plugin, pulled up close
-    var key = document.createElement('div');
-    key.style.cssText = 'display:flex;flex-wrap:wrap;gap:18px;justify-content:center;box-sizing:border-box;margin-top:2px;font-family:Nunito,sans-serif;';
-    [['No risk', GREEN], ['Low risk', AMBER], ['High risk', RED]].forEach(function (z) {
-      var s = document.createElement('span');
-      s.style.cssText = 'display:inline-flex;align-items:center;gap:6px;line-height:1;font-weight:800;font-size:12px;color:#64748b;';
-      s.innerHTML = '<span style="width:11px;height:11px;border-radius:50%;background:' + z[1] + ';flex:none;"></span>' + z[0];
-      key.appendChild(s);
-    });
-    container.parentNode.insertBefore(key, container.nextSibling);
-    chart.$key = key;
-    chart.update();
+    // risk-zone key is drawn in-canvas by the zoneKey plugin (tight under the x-axis title)
   }
 
   // ================= DISPATCH =================
