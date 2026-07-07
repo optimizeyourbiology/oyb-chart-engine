@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.13
+ * OYB Chart Engine — v1.1.14
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -133,8 +133,10 @@ document.addEventListener('DOMContentLoaded', function () {
   // as there is real UV/IR signal (>= 1% of peak), snapped to a tidy 20 nm boundary. A pure-visible SPD
   // stays 380-780; a red+IR pulse-ox or a UVB lamp stretches to include its invisible peak.
   function spdRange(nm, ys) {
-    var peak = 0, i, v;
+    var peak = 0, i, v, dataMin = Infinity, dataMax = -Infinity;
     for (i = 0; i < ys.length; i++) { v = Math.abs(ys[i] || 0); if (v > peak) peak = v; }
+    for (i = 0; i < nm.length; i++) { if (!isNaN(nm[i])) { if (nm[i] < dataMin) dataMin = nm[i]; if (nm[i] > dataMax) dataMax = nm[i]; } }
+    if (!isFinite(dataMin)) return { min: 380, max: 780 };
     var thr = peak * 0.01, lo = Infinity, hi = -Infinity;
     for (i = 0; i < nm.length; i++) {
       if (isNaN(nm[i])) continue;
@@ -143,6 +145,11 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!isFinite(lo)) { lo = 380; hi = 780; }
     lo = Math.min(380, Math.floor((lo - 10) / 20) * 20);
     hi = Math.max(780, Math.ceil((hi + 10) / 20) * 20);
+    // Never extend the axis past where data actually exists — the snapped visible anchor (380/780) is only
+    // a floor/ceiling, not a mandate to pad empty space. A 380-780 spectrum stays 380-780 even when its
+    // signal reaches the edges; only genuine UV/IR *samples* push the axis out.
+    lo = Math.max(dataMin, lo);
+    hi = Math.min(dataMax, hi);
     return { min: Math.max(200, lo), max: Math.min(1100, hi) };
   }
   // Round ticks across whatever range the axis ended up spanning (50 nm for narrow, 100 nm for wide).
