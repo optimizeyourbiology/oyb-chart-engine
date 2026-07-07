@@ -1,5 +1,5 @@
 /*
- * OYB Chart Engine — v1.1.11
+ * OYB Chart Engine — v1.1.13
  * Canonical renderer for the WordPress charts.
  * Types: bar · line · spd · flicker · flicker_risk
  *
@@ -9,7 +9,7 @@
  *
  * Reads container attributes emitted by the [oyb_chart] shortcode:
  *   data-type, data-x, data-y, data-csv (base64),
- *   data-highlight, data-units, data-distance,
+ *   data-highlight, data-units, data-distance, data-nonvisual,
  *   data-flicker-percent, data-flicker-frequency
  */
 document.addEventListener('DOMContentLoaded', function () {
@@ -129,8 +129,41 @@ document.addEventListener('DOMContentLoaded', function () {
   var AXIS_TITLE = function (text) {
     return { display: !!text, text: upper(text), font: AXIS_TITLE_FONT, color: AXIS_COLOR, padding: TITLE_PAD };
   };
-  // Force an even, round SPD wavelength axis (identical on single + multiple charts)
-  function spdTicks(scale) { scale.ticks = [380, 430, 480, 530, 580, 630, 680, 730, 780].map(function (v) { return { value: v }; }); }
+  // Adaptive SPD wavelength axis. Anchors to the visible band (380-780) and extends outward only as far
+  // as there is real UV/IR signal (>= 1% of peak), snapped to a tidy 20 nm boundary. A pure-visible SPD
+  // stays 380-780; a red+IR pulse-ox or a UVB lamp stretches to include its invisible peak.
+  function spdRange(nm, ys) {
+    var peak = 0, i, v;
+    for (i = 0; i < ys.length; i++) { v = Math.abs(ys[i] || 0); if (v > peak) peak = v; }
+    var thr = peak * 0.01, lo = Infinity, hi = -Infinity;
+    for (i = 0; i < nm.length; i++) {
+      if (isNaN(nm[i])) continue;
+      if (Math.abs(ys[i] || 0) >= thr) { if (nm[i] < lo) lo = nm[i]; if (nm[i] > hi) hi = nm[i]; }
+    }
+    if (!isFinite(lo)) { lo = 380; hi = 780; }
+    lo = Math.min(380, Math.floor((lo - 10) / 20) * 20);
+    hi = Math.max(780, Math.ceil((hi + 10) / 20) * 20);
+    return { min: Math.max(200, lo), max: Math.min(1100, hi) };
+  }
+  // Round ticks across whatever range the axis ended up spanning (50 nm for narrow, 100 nm for wide).
+  function spdTicksFor(min, max) {
+    return function (scale) {
+      var step = (max - min) <= 450 ? 50 : 100, ticks = [], t = Math.ceil(min / step) * step;
+      for (; t <= max + 1e-6; t += step) ticks.push({ value: t });
+      scale.ticks = ticks;
+    };
+  }
+  // The melanopic overlay is a circadian/visual-light lens, so it only belongs on lights whose PURPOSE is
+  // visual. That's not something the spectrum can tell us — a pulse-ox emits visible red/blue against skin,
+  // never toward an eye — so the operator declares it per chart via the `non_visual` meta (data-nonvisual).
+  // Default (empty) = visual light -> melanopic shown (unchanged for every existing lamp chart);
+  // truthy -> hide (pulse-ox, UV, IR-therapy, and any non-visual emitter).
+  function melAllowed(o) {
+    // Robust to however the JetEngine checkbox stores its value: empty/false-ish = visual (show melanopic);
+    // any other non-empty value (1, true, yes, on, a checkbox's own label, ...) = non-visual (hide).
+    var v = ((o && o.nonvisual) || '').toString().trim().toLowerCase();
+    return v === '' || v === '0' || v === 'false' || v === 'no' || v === 'off';
+  }
 
   // ---------- plugins ----------
   var valueLabels = {
@@ -368,17 +401,26 @@ document.addEventListener('DOMContentLoaded', function () {
     if (single) {
       // single SPD: normalized shape by default; if a distance is set, show real irradiance on a y-axis
       var raw = parsed.datasets[0].data.slice();
-      var startNM = 380, endNM = startNM + raw.length - 1;
+      // Use the actual Wavelength column (col 0) as x. Back-compat: if it's missing/non-numeric,
+      // fall back to the old assumption of 380 nm @ 1 nm steps.
+      var nmS = parsed.xLabels.map(parseFloat);
+      if (!(nmS.length === raw.length && nmS.every(function (v) { return !isNaN(v); }))) nmS = raw.map(function (_, i) { return 380 + i; });
+      var rng = spdRange(nmS, raw), startNM = rng.min, endNM = rng.max;
       var rawMax = Math.max.apply(null, raw) || 1;
       var absSingle = hasAbsolute;
-      var xy = raw.map(function (v, i) { return { x: startNM + i, y: absSingle ? v : v / rawMax }; });
+      var xy = raw.map(function (v, i) { return { x: nmS[i], y: absSingle ? v : v / rawMax }; });
       var chart = new Chart(ctx, {
         type: 'line',
         data: { datasets: [{ label: 'SPD', data: xy, borderColor: 'transparent', borderWidth: 0, fill: true, pointRadius: 0, tension: 0.1, clip: false, backgroundColor: function (c) {
           var area = c.chart.chartArea; if (!area) return 'rgba(0,0,0,0.1)';
           var g = ctx.createLinearGradient(area.left, 0, area.right, 0);
-          var pos = function (nm) { return Math.max(0, Math.min(1, (nm - startNM) / (endNM - startNM))); };
-          g.addColorStop(0, 'rgba(75,0,130,1)'); g.addColorStop(pos(450), 'rgba(0,0,255,1)'); g.addColorStop(pos(490), 'rgba(0,255,255,1)'); g.addColorStop(pos(530), 'rgba(0,255,0,1)'); g.addColorStop(pos(580), 'rgba(255,255,0,1)'); g.addColorStop(pos(620), 'rgba(255,127,0,1)'); g.addColorStop(pos(700), 'rgba(255,0,0,1)'); g.addColorStop(1, 'rgba(100,0,0,1)');
+          var span = (endNM - startNM) || 1;
+          var pos = function (nm) { return Math.max(0, Math.min(1, (nm - startNM) / span)); };
+          var stop = function (nm, col) { g.addColorStop(pos(nm), col); };
+          // UV (<380, invisible) violet -> dark; visible spectral; IR (>780, invisible) deep red -> near-black
+          if (startNM < 380) stop(startNM, 'rgba(45,0,75,1)');
+          stop(380, 'rgba(75,0,130,1)'); stop(450, 'rgba(0,0,255,1)'); stop(490, 'rgba(0,255,255,1)'); stop(530, 'rgba(0,255,0,1)'); stop(580, 'rgba(255,255,0,1)'); stop(620, 'rgba(255,127,0,1)'); stop(700, 'rgba(255,0,0,1)'); stop(780, 'rgba(120,0,0,1)');
+          if (endNM > 780) stop(endNM, 'rgba(45,0,0,1)');
           return g;
         } }] },
         options: {
@@ -386,7 +428,7 @@ document.addEventListener('DOMContentLoaded', function () {
           interaction: { mode: 'index', intersect: false },
           plugins: { legend: { display: false }, tooltip: { enabled: false, external: spdSingleTip } },
           scales: {
-            x: { type: 'linear', min: startNM, max: endNM, grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicks, ticks: { color: TICK_COLOR } },
+            x: { type: 'linear', min: startNM, max: endNM, grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicksFor(startNM, endNM), ticks: { color: TICK_COLOR } },
             y: absSingle
               ? { min: 0, beginAtZero: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR }, title: { display: true, text: SPD_ABS_UNITS, font: AXIS_TITLE_FONT, color: AXIS_COLOR, padding: TITLE_PAD } }
               : { min: 0, max: 1, display: false }
@@ -397,7 +439,7 @@ document.addEventListener('DOMContentLoaded', function () {
       chart.$absolute = absSingle;
       chart.$yMax = absSingle ? rawMax : 1;
       chart.$melScale = absSingle ? rawMax : 1;
-      spdMelToggle(container, chart, o.distance);
+      spdMelToggle(container, chart, o.distance, melAllowed(o));
       return;
     }
 
@@ -417,7 +459,7 @@ document.addEventListener('DOMContentLoaded', function () {
         plugins: { legend: { display: false },
           tooltip: { enabled: false, external: makeMultiTip(function (x) { return Math.round(x) + ' nm'; }, function (p) { return abs ? p.parsed.y.toFixed(2) : (p.parsed.y * 100).toFixed(0) + '%'; }) } },
         scales: {
-          x: { type: 'linear', min: Math.min.apply(null, nm), max: Math.max.apply(null, nm), grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicks, ticks: { color: TICK_COLOR } },
+          x: { type: 'linear', min: Math.min.apply(null, nm), max: Math.max.apply(null, nm), grid: { display: false }, title: AXIS_TITLE(FIXED_AXIS.spd.x), afterBuildTicks: spdTicksFor(Math.min.apply(null, nm), Math.max.apply(null, nm)), ticks: { color: TICK_COLOR } },
           y: { min: 0, beginAtZero: true, grid: { color: GRID_COLOR }, title: AXIS_TITLE('') }
         }
       },
@@ -447,17 +489,22 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     var _sep = document.createElement('span'); _sep.style.cssText = 'width:1px;align-self:stretch;min-height:22px;background:#e2d0d6;margin:0 6px;'; barc.appendChild(_sep);
     if (hasAbsolute) { barc.appendChild(segmented(['Normalized', 'Absolute'], 0, function (i) { abs = (i === 1); draw(); })); }
-    var bMel = toggleBtn('Melanopic', false);
-    bMel.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(bMel, !!chart.$showMel); chart.update(); };
-    barc.appendChild(bMel);
+    if (melAllowed(o)) {
+      var bMel = toggleBtn('Melanopic', false);
+      bMel.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(bMel, !!chart.$showMel); chart.update(); };
+      barc.appendChild(bMel);
+    }
     if (o.distance) { var note = document.createElement('span'); note.textContent = 'measured at ' + o.distance; note.style.cssText = 'font-size:12px;color:#94a3b8;font-weight:700;align-self:center;margin-left:4px;'; barc.appendChild(note); }
   }
 
-  function spdMelToggle(container, chart, distance) {
+  function spdMelToggle(container, chart, distance, showMel) {
+    if (!showMel && !distance) return; // nothing to show -> no controls bar at all
     var barc = makeControls(container);
-    var b = toggleBtn('Melanopic', false);
-    b.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(b, !!chart.$showMel); chart.update(); };
-    barc.appendChild(b);
+    if (showMel) {
+      var b = toggleBtn('Melanopic', false);
+      b.onclick = function () { chart.$showMel = !chart.$showMel; paintToggle(b, !!chart.$showMel); chart.update(); };
+      barc.appendChild(b);
+    }
     if (distance) { var note = document.createElement('span'); note.textContent = 'Measured at ' + distance; note.style.cssText = 'font-size:12px;color:#94a3b8;font-weight:700;align-self:center;margin-left:4px;'; barc.appendChild(note); }
   }
 
@@ -625,6 +672,7 @@ document.addEventListener('DOMContentLoaded', function () {
       highlight: container.getAttribute('data-highlight'),
       units: container.getAttribute('data-units'),
       distance: container.getAttribute('data-distance'),
+      nonvisual: container.getAttribute('data-nonvisual'),
       flickerPercent: container.getAttribute('data-flicker-percent'),
       flickerFrequency: container.getAttribute('data-flicker-frequency')
     };
