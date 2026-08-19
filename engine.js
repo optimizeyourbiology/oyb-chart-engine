@@ -1,7 +1,14 @@
 /*
- * OYB Chart Engine — v1.1.14
+ * OYB Chart Engine — v1.1.15
  * Canonical renderer for the WordPress charts.
- * Types: bar · line · spd · flicker · flicker_risk
+ * Types: bar · line · spd · flicker · flicker_risk · deviation
+ *
+ * v1.1.15: NEW `deviation` type — zero-centered deviation-vs-reference line (pulse-ox accuracy visual).
+ *         CSV contract: col 0 = elapsed time label (H:MM), cols 1+ = deviation series (device minus
+ *         reference, in SpO2 points; one column per night or per device). Renders a shaded +/-2 pt
+ *         agreement band (ISO 80601-2-61 / MS100 tolerance), a dashed zero line, symmetric y-axis,
+ *         series pills (multi-series toggle), and live stat chips (Bias / Within +/-2 / Worst) computed
+ *         from the VISIBLE plotted data so chips always match the chart. Reuses data-highlight for heroes.
  *
  * Deploy: edit here -> commit to github.com/optimizeyourbiology/oyb-chart-engine
  *         -> publish release tag vX.Y.Z -> bump the @version in the WPCode PHP enqueue.
@@ -665,6 +672,113 @@ document.addEventListener('DOMContentLoaded', function () {
     // risk-zone key is drawn in-canvas by the zoneKey plugin (tight under the x-axis title)
   }
 
+  function renderDeviation(container, canvas, parsed, o) {
+    // Zero-centered deviation vs reference. Values are (measurement - reference).
+    // GENERIC by design: pulse-ox accuracy is the first use, but any "device vs reference over time
+    // with a tolerance band" fits (temp pad vs setpoint, HR wearable vs chest strap, ...).
+    // data-band (meta `deviation_band`) overrides the band half-width; default 2 = the SpO2
+    // ISO 80601-2-61 tolerance. data-units (meta `units`) overrides the chip unit label; default "pts".
+    var PM = String.fromCharCode(177); // plus-minus sign, kept out of the source (ASCII-only rule)
+    var BAND = parseFloat(o.band); if (isNaN(BAND) || BAND <= 0) BAND = 2;
+    var UNIT = (o.units || 'pts').trim();
+    var heroes = heroList(o.highlight);
+    var multi = parsed.datasets.length > 1;
+    var lw = isMobile() ? 1.5 : 2;
+
+    // symmetric y range: at least 1.5x the band so the band never fills the whole plot
+    var maxAbs = 0;
+    parsed.datasets.forEach(function (dsi) { dsi.data.forEach(function (v) { if (v != null && Math.abs(v) > maxAbs) maxAbs = Math.abs(v); }); });
+    var pad = Math.max(BAND * 1.5, maxAbs);
+    var yLim = BAND >= 1 ? Math.ceil(pad) : Math.ceil(pad * 10) / 10;
+
+    parsed.datasets.forEach(function (dsi, i) {
+      var color = multi ? OYB[i % OYB.length] : heroColorOf(dsi.label, heroes, PINK);
+      dsi._hex = color;
+      dsi.borderColor = color; dsi.backgroundColor = color;
+      dsi.fill = false; dsi.borderWidth = lw; dsi.pointRadius = 0; dsi.pointHoverRadius = 0;
+      dsi.tension = 0.15; dsi.borderCapStyle = 'round'; dsi.borderJoinStyle = 'round'; dsi.spanGaps = false;
+    });
+
+    var bandLayer = {
+      id: 'deviationBand',
+      beforeDatasetsDraw: function (chart) {
+        var ys = chart.scales.y, a = chart.chartArea, ctx = chart.ctx;
+        var yTop = ys.getPixelForValue(BAND), yBot = ys.getPixelForValue(-BAND), y0 = ys.getPixelForValue(0);
+        ctx.save();
+        // the agreement band
+        ctx.fillStyle = 'rgba(16,185,129,0.10)';
+        ctx.fillRect(a.left, yTop, a.right - a.left, yBot - yTop);
+        // band edges
+        ctx.strokeStyle = 'rgba(16,185,129,0.45)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(a.left, yTop); ctx.lineTo(a.right, yTop); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(a.left, yBot); ctx.lineTo(a.right, yBot); ctx.stroke();
+        // zero line
+        ctx.setLineDash([]); ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(a.left, y0); ctx.lineTo(a.right, y0); ctx.stroke();
+        // in-band label, top-right
+        ctx.font = '800 10px Nunito'; ctx.fillStyle = 'rgba(5,150,105,0.85)';
+        ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+        ctx.fillText(PM + BAND + ' ' + upper(UNIT) + ' AGREEMENT BAND', a.right - 6, yTop + 4);
+        ctx.restore();
+      }
+    };
+
+    var chart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { labels: parsed.xLabels, datasets: parsed.datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { grid: { display: false }, ticks: { color: TICK_COLOR, maxTicksLimit: isMobile() ? 6 : 10, maxRotation: 0, autoSkip: true }, title: AXIS_TITLE(o.x || 'Time (hours)') },
+          y: { min: -yLim, max: yLim, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR, stepSize: BAND >= 1 ? 1 : undefined, callback: function (v) { var t = Math.round(v * 100) / 100; return t > 0 ? '+' + t : String(t); } }, title: AXIS_TITLE(o.y || 'Deviation from reference (SpO2 pts)') }
+        }
+      },
+      plugins: [bandLayer]
+    });
+
+    // ---- stat chips (computed from the VISIBLE plotted data, live on pill toggles) ----
+    function chipHtml(k, v, color) {
+      return '<div style="flex:1;text-align:center;background:#fff;border:1px solid #f1e3e6;border-radius:12px;padding:8px 14px;min-width:0;"><div style="font-size:11px;font-weight:800;letter-spacing:.4px;color:#94a3b8;text-transform:uppercase;">' + k + '</div><div style="font-size:18px;font-weight:900;color:' + (color || NAVY) + ';">' + v + '</div></div>';
+    }
+    var chips = document.createElement('div');
+    chips.style.cssText = 'display:flex;gap:10px;margin-top:14px;font-family:Nunito,sans-serif;';
+    container.parentNode.insertBefore(chips, container.nextSibling);
+    function redrawChips() {
+      var vals = [];
+      parsed.datasets.forEach(function (dsi, i) {
+        if (multi && !chart.isDatasetVisible(i)) return;
+        dsi.data.forEach(function (v) { if (v != null && !isNaN(v)) vals.push(v); });
+      });
+      if (!vals.length) { chips.innerHTML = ''; return; }
+      var sum = 0, inBand = 0, worst = 0;
+      vals.forEach(function (v) { sum += v; if (Math.abs(v) <= BAND) inBand++; if (Math.abs(v) > Math.abs(worst)) worst = v; });
+      var bias = sum / vals.length, pct = inBand / vals.length * 100;
+      var biasTxt = (bias >= 0 ? '+' : '') + (Math.round(bias * 100) / 100).toFixed(2) + ' ' + UNIT;
+      var pctTxt = (Math.round(pct * 10) / 10) + '%';
+      var worstTxt = (worst > 0 ? '+' : '') + (Math.round(worst * 10) / 10) + ' ' + UNIT;
+      var pctColor = pct >= 95 ? GREEN : pct >= 90 ? AMBER : RED;
+      chips.innerHTML = chipHtml('Bias', biasTxt) + chipHtml('Within ' + PM + BAND + ' ' + UNIT, pctTxt, pctColor) + chipHtml('Worst moment', worstTxt, Math.abs(worst) <= BAND ? NAVY : RED);
+    }
+    redrawChips();
+
+    // ---- pills: per-series visibility toggle (multi-series = nights or devices) ----
+    if (multi) {
+      var barc = makeControls(container);
+      parsed.datasets.forEach(function (dsi, i) {
+        var btn = document.createElement('button'); btn.type = 'button'; btn.textContent = dsi.label;
+        stylePill(btn, dsi._hex, true);
+        btn.onclick = function () {
+          var vis = !chart.isDatasetVisible(i);
+          chart.setDatasetVisibility(i, vis); chart.update();
+          stylePill(btn, dsi._hex, vis); redrawChips();
+        };
+        barc.appendChild(btn);
+      });
+    }
+  }
+
   // ================= DISPATCH =================
   containers.forEach(function (container) {
     var canvas = container.querySelector('canvas');
@@ -680,6 +794,7 @@ document.addEventListener('DOMContentLoaded', function () {
       units: container.getAttribute('data-units'),
       distance: container.getAttribute('data-distance'),
       nonvisual: container.getAttribute('data-nonvisual'),
+      band: container.getAttribute('data-band'),
       flickerPercent: container.getAttribute('data-flicker-percent'),
       flickerFrequency: container.getAttribute('data-flicker-frequency')
     };
@@ -690,6 +805,7 @@ document.addEventListener('DOMContentLoaded', function () {
       else if (type === 'spd') renderSPD(container, canvas, parsed, o);
       else if (type === 'flicker') renderFlicker(container, canvas, parsed, o);
       else if (type === 'flicker_risk' || type === 'flicker-risk') renderFlickerRisk(container, canvas, parsed, o);
+      else if (type === 'deviation') renderDeviation(container, canvas, parsed, o);
     } catch (e) {
       if (window.console) console.error('OYB chart render error (' + type + '):', e);
     }
